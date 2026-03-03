@@ -97,6 +97,36 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
+// Register Endpoint
+app.post('/api/register', async (req, res) => {
+    try {
+        const { phone, password, name } = req.body;
+        
+        // Check if user already exists
+        const existingUser = await User.findOne({ phone });
+        if (existingUser) {
+            return res.status(400).json({ success: false, message: 'Phone number already registered. Please login.' });
+        }
+
+        // Create new user (Giving them 50 KES free bonus to test with!)
+        const newUser = new User({
+            phone,
+            password,
+            name: name || 'New Player',
+            balance: 50 
+        });
+
+        await newUser.save();
+
+        res.json({ 
+            success: true, 
+            user: { name: newUser.name, balance: newUser.balance, phone: newUser.phone } 
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: 'Server error during registration' });
+    }
+});
 
 app.post('/api/place-bet', async (req, res) => {
     try {
