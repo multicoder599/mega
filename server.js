@@ -11,11 +11,12 @@ const app = express();
 const allowedOrigins = [
     'http://localhost:3000',
     'http://127.0.0.1:5500',
-    /\.surge\.sh$/ // This allows any surge.sh subdomain
+    /https:\/\/.*\.surge\.sh$/ // Securely allows any surge.sh subdomain
 ];
 
 app.use(cors({
     origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin || allowedOrigins.some(domain => 
             typeof domain === 'string' ? domain === origin : domain.test(origin)
         )) {
@@ -42,7 +43,7 @@ mongoose.connect(MONGO_URI)
 // --- MODELS (User & Bet) ---
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
+    password: { type: String, required: true }, // Note: In production, hash this using bcrypt!
     name: { type: String, required: true },
     balance: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
@@ -61,22 +62,24 @@ const betSchema = new mongoose.Schema({
 const Bet = mongoose.model('Bet', betSchema);
 
 // ==========================================
-// NEW: SECURE ODDS API ENDPOINT
+// SECURE ODDS API ENDPOINT
 // ==========================================
 app.get('/api/matches', async (req, res) => {
     try {
-        const response = await axios.get('https://api.the-odds-api.com/v4/sports/soccer_kenya_premier_league/odds', {
+        // Fetching broad upcoming matches across multiple sports
+        const response = await axios.get('https://api.the-odds-api.com/v4/sports/upcoming/odds', {
             params: {
                 apiKey: process.env.ODDS_API_KEY,
-                regions: 'eu',
+                regions: 'eu,uk',
                 markets: 'h2h',
                 oddsFormat: 'decimal'
             }
         });
         res.json(response.data);
     } catch (error) {
-        console.error('Odds API Error:', error.message);
-        res.status(500).json({ error: 'Failed to fetch matches' });
+        // Better error logging for debugging API limits
+        console.error('Odds API Error:', error.response ? error.response.data : error.message);
+        res.status(500).json({ error: 'Failed to fetch matches from external provider' });
     }
 });
 
@@ -84,6 +87,7 @@ app.get('/api/matches', async (req, res) => {
 // AUTH & BETTING ENDPOINTS
 // ==========================================
 
+// Login Endpoint
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
@@ -91,12 +95,13 @@ app.post('/api/login', async (req, res) => {
         if (user) {
             res.json({ success: true, user: { name: user.name, balance: user.balance, phone: user.phone } });
         } else {
-            res.status(401).json({ success: false, message: 'Invalid credentials' });
+            res.status(401).json({ success: false, message: 'Invalid phone number or password' });
         }
     } catch (error) {
         res.status(500).json({ success: false, message: 'Server error' });
     }
 });
+
 // Register Endpoint
 app.post('/api/register', async (req, res) => {
     try {
@@ -128,13 +133,14 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+// Place Bet Endpoint
 app.post('/api/place-bet', async (req, res) => {
     try {
         const { userPhone, stake, selections, potentialWin } = req.body;
         const user = await User.findOne({ phone: userPhone });
 
         if (!user || user.balance < stake) {
-            return res.status(400).json({ success: false, message: 'Insufficient funds' });
+            return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
         }
 
         user.balance -= stake;
