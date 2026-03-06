@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const bcrypt = require('bcryptjs'); // NEW: Added for secure password hashing
 
 const app = express();
 
@@ -16,6 +17,8 @@ const allowedOrigins = [
     /https:\/\/.*\.surge\.sh$/ // Securely allows any surge.sh subdomain
 ];
 
+// In development, sometimes it's easier to just allow all origins. 
+// If you face CORS issues testing locally, you can temporarily change this to cors()
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.some(domain => 
@@ -44,7 +47,7 @@ mongoose.connect(MONGO_URI)
 // --- 1. User Model ---
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
-    password: { type: String, required: true }, // Remember to hash in production!
+    password: { type: String, required: true }, 
     name: { type: String, required: true },
     balance: { type: Number, default: 0 },
     createdAt: { type: Date, default: Date.now }
@@ -64,13 +67,13 @@ const betSchema = new mongoose.Schema({
 });
 const Bet = mongoose.model('Bet', betSchema);
 
-// --- 3. Transaction Model (NEW for Finance) ---
+// --- 3. Transaction Model ---
 const transactionSchema = new mongoose.Schema({
     refId: { type: String, required: true, unique: true },
     userPhone: { type: String, required: true },
     type: { type: String, enum: ['deposit', 'withdraw', 'bet', 'bonus', 'win'], required: true },
-    method: { type: String, required: true }, // e.g., 'M-Pesa', 'Card', 'Sports Bet'
-    amount: { type: Number, required: true }, // Positive for deposits/wins, Negative for bets/withdrawals
+    method: { type: String, required: true },
+    amount: { type: Number, required: true }, 
     status: { type: String, enum: ['Pending', 'Success', 'Failed'], default: 'Success' },
     createdAt: { type: Date, default: Date.now }
 });
@@ -78,11 +81,10 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 
 // ==========================================
-// SECURE ODDS API PROXY (Hides your API Key)
+// SECURE ODDS API PROXY
 // ==========================================
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
-// Fetch active sports
 app.get('/api/sports', async (req, res) => {
     try {
         const response = await axios.get(`https://api.the-odds-api.com/v4/sports/?apiKey=${ODDS_API_KEY}`);
@@ -93,7 +95,6 @@ app.get('/api/sports', async (req, res) => {
     }
 });
 
-// Fetch odds for a specific sport (with multiple markets!)
 app.get('/api/odds/:sportKey', async (req, res) => {
     try {
         const { sportKey } = req.params;
@@ -101,7 +102,7 @@ app.get('/api/odds/:sportKey', async (req, res) => {
             params: {
                 apiKey: ODDS_API_KEY,
                 regions: 'eu,uk,us',
-                markets: 'h2h,totals,btts', // Fetches 1X2, Over/Under, and BTTS
+                markets: 'h2h,totals,btts',
                 oddsFormat: 'decimal'
             }
         });
@@ -113,35 +114,39 @@ app.get('/api/odds/:sportKey', async (req, res) => {
 });
 
 // ==========================================
-// AUTHENTICATION ENDPOINTS
+// UPGRADED AUTHENTICATION ENDPOINTS
 // ==========================================
-app.post('/api/login', async (req, res) => {
-    try {
-        const { phone, password } = req.body;
-        const user = await User.findOne({ phone, password });
-        if (user) {
-            res.json({ success: true, user: { name: user.name, balance: user.balance, phone: user.phone } });
-        } else {
-            res.status(401).json({ success: false, message: 'Invalid phone number or password' });
-        }
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
-});
 
+// REGISTER
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, password, name } = req.body;
         
+        // 1. Basic validation
+        if (!phone || !password) {
+            return res.status(400).json({ success: false, message: 'Phone and password are required.' });
+        }
+
+        // 2. Check if user already exists
         const existingUser = await User.findOne({ phone });
         if (existingUser) {
             return res.status(400).json({ success: false, message: 'Phone number already registered. Please login.' });
         }
 
-        const newUser = new User({ phone, password, name: name || 'New Player', balance: 100 }); // 100 KES Welcome Bonus
+        // 3. Hash the password securely
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // 4. Create new user with hashed password
+        const newUser = new User({ 
+            phone, 
+            password: hashedPassword, 
+            name: name || 'New Player', 
+            balance: 100 // 100 KES Welcome Bonus
+        });
         await newUser.save();
 
-        // Log the welcome bonus as a transaction
+        // 5. Log the welcome bonus as a transaction
         await Transaction.create({
             refId: 'BONUS-' + Math.floor(Math.random() * 900000),
             userPhone: phone,
@@ -150,15 +155,52 @@ app.post('/api/register', async (req, res) => {
             amount: 100
         });
 
+        // 6. Return success (DO NOT send the password back to the client)
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, phone: newUser.phone } });
     } catch (error) {
-        console.error(error);
+        console.error("Registration Error: ", error);
         res.status(500).json({ success: false, message: 'Server error during registration' });
     }
 });
 
+// LOGIN
+app.post('/api/login', async (req, res) => {
+    try {
+        const { phone, password } = req.body;
+
+        // 1. Find user by phone number
+        const user = await User.findOne({ phone });
+        if (!user) {
+            return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
+        }
+
+        // 2. Compare the provided password with the hashed password in the DB
+        const isMatch = await bcrypt.compare(password, user.password);
+        
+        // 3. Handle older un-hashed passwords (useful if you registered users before adding bcrypt)
+        // If bcrypt fails, check if it matches the plain text. If it does, hash it and save it for future use.
+        if (!isMatch) {
+            if (password === user.password) {
+                const salt = await bcrypt.genSalt(10);
+                user.password = await bcrypt.hash(password, salt);
+                await user.save();
+            } else {
+                return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
+            }
+        }
+
+        // 4. Successful login
+        res.json({ success: true, user: { name: user.name, balance: user.balance, phone: user.phone } });
+        
+    } catch (error) {
+        console.error("Login Error: ", error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+
 // ==========================================
-// FINANCE ENDPOINTS (Deposits & Withdrawals)
+// FINANCE ENDPOINTS
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
     try {
@@ -167,11 +209,9 @@ app.post('/api/deposit', async (req, res) => {
         const user = await User.findOne({ phone: userPhone });
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-        // Update Balance
         user.balance += Number(amount);
         await user.save();
 
-        // Create Transaction Record
         const refId = 'DEP-' + Math.floor(100000 + Math.random() * 900000);
         await Transaction.create({ refId, userPhone, type: 'deposit', method, amount: Number(amount) });
 
@@ -192,11 +232,9 @@ app.post('/api/withdraw', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Insufficient funds for withdrawal.' });
         }
 
-        // Update Balance
         user.balance -= Number(amount);
         await user.save();
 
-        // Create Transaction Record
         const refId = 'WD-' + Math.floor(100000 + Math.random() * 900000);
         await Transaction.create({ refId, userPhone, type: 'withdraw', method, amount: -Number(amount) });
 
@@ -208,7 +246,6 @@ app.post('/api/withdraw', async (req, res) => {
 
 app.get('/api/transactions/:phone', async (req, res) => {
     try {
-        // Fetch user's transactions, sorted by newest first
         const txns = await Transaction.find({ userPhone: req.params.phone }).sort({ createdAt: -1 });
         res.json({ success: true, transactions: txns });
     } catch (error) {
@@ -228,19 +265,16 @@ app.post('/api/place-bet', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
         }
 
-        // Deduct Stake
         user.balance -= stake;
         await user.save();
 
         const ticketId = 'TXN-' + Math.floor(Math.random() * 900000 + 100000);
         
-        // Save Bet
         const newBet = new Bet({ 
             ticketId, userPhone, stake, potentialWin, selections, type: betType || 'Sports' 
         });
         await newBet.save();
 
-        // Log Bet as a Transaction in the user's history
         await Transaction.create({
             refId: ticketId,
             userPhone,
