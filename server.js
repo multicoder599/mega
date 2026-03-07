@@ -67,7 +67,7 @@ const Bet = mongoose.model('Bet', betSchema);
 
 // --- 3. Transaction Model ---
 const transactionSchema = new mongoose.Schema({
-    refId: { type: String, required: true, unique: true },
+    refId: { type: String, required: true, unique: true }, // Holds "DEP..." or actual M-Pesa Receipt
     userPhone: { type: String, required: true },
     type: { type: String, enum: ['deposit', 'withdraw', 'bet', 'bonus', 'win'], required: true },
     method: { type: String, required: true },
@@ -78,7 +78,6 @@ const transactionSchema = new mongoose.Schema({
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
 // --- 4. Live Game Model (For Admin Injection) ---
-// strict: false allows us to dynamically inject any JSON shape Gemini provides
 const liveGameSchema = new mongoose.Schema({
     id: Number,
     category: String,
@@ -127,10 +126,8 @@ app.get('/api/odds/:sportKey', async (req, res) => {
 });
 
 // ==========================================
-// UPGRADED AUTHENTICATION ENDPOINTS
+// AUTHENTICATION ENDPOINTS
 // ==========================================
-
-// REGISTER
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, password, name } = req.body;
@@ -170,7 +167,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// LOGIN
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
@@ -202,26 +198,121 @@ app.post('/api/login', async (req, res) => {
 
 
 // ==========================================
-// FINANCE ENDPOINTS
+// FINANCE: MEGAPAY STK PUSH (DEPOSIT)
 // ==========================================
 app.post('/api/deposit', async (req, res) => {
     try {
         const { userPhone, amount, method } = req.body;
         
+        if (amount < 50) return res.status(400).json({ success: false, message: 'Minimum deposit is 50 KES.' });
+
         const user = await User.findOne({ phone: userPhone });
-        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-        user.balance += Number(amount);
-        await user.save();
+        // Format phone for Megapay (Must start with 254)
+        let formattedPhone = userPhone.replace(/\D/g, ''); 
+        if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
+        if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
 
-        const refId = 'DEP-' + Math.floor(100000 + Math.random() * 900000);
-        await Transaction.create({ refId, userPhone, type: 'deposit', method, amount: Number(amount) });
+        const APP_URL = process.env.APP_URL || 'https://apex-efwz.onrender.com';
+        const reference = "DEP" + Date.now();
 
-        res.json({ success: true, newBalance: user.balance, refId });
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Deposit processing failed' });
+        const payload = {
+            api_key: "MGPY26G5iWPw", 
+            email: "kanyingiwaitara@gmail.com", 
+            amount: amount, 
+            msisdn: formattedPhone,
+            callback_url: `${APP_URL}/api/megapay/webhook`,
+            description: "ApexBet Deposit", 
+            reference: reference
+        };
+
+        // Call Megapay API
+        const response = await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
+
+        // Log the attempt as pending in the database
+        await Transaction.create({ 
+            refId: reference, 
+            userPhone: user.phone, 
+            type: 'deposit', 
+            method: method || 'M-Pesa', 
+            amount: Number(amount),
+            status: 'Pending' 
+        });
+
+        // Return current balance (it hasn't updated yet) so the UI doesn't fake the money
+        res.status(200).json({ 
+            success: true, 
+            message: "STK Push Sent! Check your phone.",
+            newBalance: user.balance, 
+            refId: reference 
+        });
+
+    } catch (error) { 
+        console.error("STK Error:", error);
+        res.status(500).json({ success: false, message: "Payment Gateway Error. Please try again." }); 
     }
 });
+
+// ==========================================
+// FINANCE: MEGAPAY WEBHOOK (RECEIVES CONFIRMATION)
+// ==========================================
+app.post('/api/megapay/webhook', async (req, res) => {
+    // 1. Immediately acknowledge receipt to Megapay so they stop retrying
+    res.status(200).send("OK");
+    
+    const data = req.body;
+    try {
+        // 2. Check if the payment was actually successful (Code 0)
+        const responseCode = data.ResponseCode !== undefined ? data.ResponseCode : data.ResultCode;
+        if (responseCode != 0) return; // User cancelled or failed
+
+        // 3. Extract the M-Pesa data
+        const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        let phone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
+        
+        // Format phone back to local format (e.g., 07...) to match your Database
+        if (phone.startsWith('254')) phone = '0' + phone.substring(3);
+
+        // 4. Find the matching user in ApexBet
+        const user = await User.findOne({ phone: phone });
+        if (!user) {
+            console.log(`Webhook Error: Unregistered phone paid ${amount} - ${phone}`);
+            return;
+        }
+
+        // 5. Prevent Duplicate Processing (Check if receipt exists)
+        const existingTx = await Transaction.findOne({ refId: receipt });
+        if (existingTx) {
+            console.log(`Duplicate Webhook ignored for receipt: ${receipt}`);
+            return;
+        }
+
+        // 6. Update User Balance safely
+        user.balance += amount;
+        await user.save();
+
+        // 7. Save the official completed transaction
+        await Transaction.create({
+            refId: receipt, // Save actual M-Pesa receipt here
+            userPhone: user.phone,
+            type: "deposit",
+            method: "M-Pesa",
+            amount: amount,
+            status: "Success"
+        });
+
+        console.log(`✅ Webhook Success: KES ${amount} deposited to ${user.phone}. Receipt: ${receipt}`);
+        
+        // Optional: If you have a telegram bot setup, uncomment this
+        // sendTelegramMessage(`💵 *DEPOSIT CONFIRMED*\n👤 User: ${user.phone}\n💰 Amount: KES ${amount}\n🧾 Receipt: ${receipt}`);
+        
+    } catch (err) { 
+        console.error("Webhook Processing Error:", err); 
+    }
+});
+
 
 app.post('/api/withdraw', async (req, res) => {
     try {
@@ -238,7 +329,7 @@ app.post('/api/withdraw', async (req, res) => {
         await user.save();
 
         const refId = 'WD-' + Math.floor(100000 + Math.random() * 900000);
-        await Transaction.create({ refId, userPhone, type: 'withdraw', method, amount: -Number(amount) });
+        await Transaction.create({ refId, userPhone, type: 'withdraw', method, amount: -Number(amount), status: 'Success' });
 
         res.json({ success: true, newBalance: user.balance, refId });
     } catch (error) {
@@ -254,6 +345,7 @@ app.get('/api/transactions/:phone', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to fetch transactions' });
     }
 });
+
 
 // ==========================================
 // BETTING ENDPOINT
@@ -305,8 +397,6 @@ app.get('/api/bets/:phone', async (req, res) => {
 // ==========================================
 // ADMIN LIVE GAMES INJECTOR ENDPOINTS
 // ==========================================
-
-// 1. GET: Frontend fetches injected games from here
 app.get('/api/games', async (req, res) => {
     try {
         const games = await LiveGame.find({});
@@ -317,7 +407,6 @@ app.get('/api/games', async (req, res) => {
     }
 });
 
-// 2. POST: Admin panel sends new games here
 app.post('/api/games', async (req, res) => {
     try {
         const { games, mode } = req.body;
@@ -340,7 +429,6 @@ app.post('/api/games', async (req, res) => {
     }
 });
 
-// 3. DELETE: Admin panel clears all games
 app.delete('/api/games', async (req, res) => {
     try {
         await LiveGame.deleteMany({});
