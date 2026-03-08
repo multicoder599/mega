@@ -172,26 +172,18 @@ app.post('/api/register', async (req, res) => {
             phone, 
             password: hashedPassword, 
             name: name || 'New Player', 
-            balance: 100 
+            balance: 0 // Bonus removed as requested
         });
         await newUser.save();
-
-        await Transaction.create({
-            refId: 'BONUS-' + Math.floor(Math.random() * 900000),
-            userPhone: phone,
-            type: 'bonus',
-            method: 'Welcome Bonus',
-            amount: 100
-        });
 
         // 🚨 TELEGRAM NOTIFICATION: NEW USER
         sendTelegramMessage(
             `🚨 <b>NEW USER REGISTRATION</b> 🚨\n\n` +
             `👤 <b>Name:</b> ${newUser.name}\n` +
-            `📱 <b>Phone:</b> ${newUser.phone}\n` +
-            `🎁 <b>Welcome Bonus:</b> KES 100`
+            `📱 <b>Phone:</b> ${newUser.phone}`
         );
 
+        // Never send password back to the frontend
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, phone: newUser.phone } });
     } catch (error) {
         console.error("Registration Error: ", error);
@@ -372,6 +364,18 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
+// Fetch Single User Balance for live syncing
+app.get('/api/balance/:phone', async (req, res) => {
+    try {
+        const user = await User.findOne({ phone: req.params.phone });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+        
+        res.json({ success: true, balance: user.balance });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Server error fetching balance' });
+    }
+});
+
 app.get('/api/transactions/:phone', async (req, res) => {
     try {
         const txns = await Transaction.find({ userPhone: req.params.phone }).sort({ createdAt: -1 });
@@ -430,6 +434,77 @@ app.get('/api/bets/:phone', async (req, res) => {
 
 
 // ==========================================
+// ADMIN ROUTES (MANAGE USERS & BALANCES)
+// ==========================================
+
+// 1. Get all registered users (Passwords completely hidden)
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        // .select('-password') ensures password hashes never leave the server
+        const users = await User.find({}).select('-password').sort({ createdAt: -1 });
+        res.json({ success: true, users });
+    } catch (error) {
+        console.error("Admin Fetch Users Error:", error);
+        res.status(500).json({ success: false, message: 'Failed to fetch users for admin panel' });
+    }
+});
+
+// 2. Manually Edit/Update a user's balance
+app.put('/api/admin/users/balance', async (req, res) => {
+    try {
+        const { phone, newBalance } = req.body;
+        
+        if (newBalance === undefined) return res.status(400).json({ success: false, message: 'New balance is required' });
+
+        const user = await User.findOne({ phone });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        const oldBalance = user.balance;
+        user.balance = Number(newBalance);
+        await user.save();
+
+        // Log this adjustment so the user sees it in their transaction history
+        await Transaction.create({
+            refId: 'ADMIN-' + Math.floor(Math.random() * 900000),
+            userPhone: phone,
+            type: 'bonus', // Categorized as bonus to avoid confusing withdrawal metrics
+            method: 'Admin Adjustment',
+            amount: user.balance - oldBalance,
+            status: 'Success'
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Balance for ${phone} successfully updated to KES ${user.balance}.`, 
+            user: { phone: user.phone, balance: user.balance, name: user.name } 
+        });
+    } catch (error) {
+        console.error("Admin Edit Balance Error:", error);
+        res.status(500).json({ success: false, message: 'Failed to update user balance' });
+    }
+});
+
+// 3. Delete a User Account completely
+app.delete('/api/admin/users/:phone', async (req, res) => {
+    try {
+        const { phone } = req.params;
+        const user = await User.findOneAndDelete({ phone });
+        
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        // Optional: Uncomment the lines below if you also want to wipe their bets and transactions when they are deleted
+        // await Bet.deleteMany({ userPhone: phone });
+        // await Transaction.deleteMany({ userPhone: phone });
+
+        res.json({ success: true, message: `Account for ${phone} has been permanently deleted.` });
+    } catch (error) {
+        console.error("Admin Delete User Error:", error);
+        res.status(500).json({ success: false, message: 'Failed to delete user account' });
+    }
+});
+
+
+// ==========================================
 // ADMIN LIVE GAMES INJECTOR ENDPOINTS
 // ==========================================
 app.get('/api/games', async (req, res) => {
@@ -451,10 +526,10 @@ app.post('/api/games', async (req, res) => {
         }
 
         if (mode === 'replace') {
-            await LiveGame.deleteMany({}); // Wipe DB clean
+            await LiveGame.deleteMany({}); 
         }
         
-        await LiveGame.insertMany(games); // Save new games to MongoDB
+        await LiveGame.insertMany(games); 
         
         const totalCount = await LiveGame.countDocuments();
         res.json({ success: true, message: "Games updated in database", count: totalCount });
