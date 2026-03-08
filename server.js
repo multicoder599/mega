@@ -5,11 +5,11 @@ const path = require('path');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const bcrypt = require('bcryptjs'); 
-const http = require('http'); // Required for Socket.io
-const { Server } = require('socket.io'); // Import Socket.io
+const http = require('http'); 
+const { Server } = require('socket.io'); 
 
 const app = express();
-const server = http.createServer(app); // Wrap express in HTTP server
+const server = http.createServer(app); 
 
 // ==========================================
 // CORS & SOCKET CONFIGURATION
@@ -38,20 +38,26 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 // ==========================================
 // REAL-TIME SOCKET HANDLER
 // ==========================================
-const activeSockets = {}; // Maps phone numbers to socket IDs
+const activeSockets = {}; 
 
 io.on('connection', (socket) => {
-    // Register user phone to target specific notifications
+    // 🟢 FIX: Normalize phone number so admin notifications always reach the user
     socket.on('register_user', (phone) => {
         if(phone) {
-            activeSockets[phone] = socket.id;
-            console.log(`User ${phone} connected to socket`);
+            let formattedPhone = phone.replace(/\D/g, '');
+            if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
+            if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
+            
+            // Store both raw and formatted to ensure delivery
+            activeSockets[formattedPhone] = socket.id;
+            activeSockets[phone] = socket.id; 
+            console.log(`User ${formattedPhone} connected to socket`);
         }
     });
 
-    // Join specific chat room for live support
     socket.on('join_chat', (chatId) => {
         socket.join(chatId);
+        console.log(`User joined chat room: ${chatId}`);
     });
 
     socket.on('disconnect', () => {
@@ -61,9 +67,12 @@ io.on('connection', (socket) => {
     });
 });
 
-// Helper function to send instant alerts to specific users
 function sendPushNotification(phone, title, message, type) {
-    const socketId = activeSockets[phone];
+    let formattedPhone = phone.replace(/\D/g, '');
+    if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
+    if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
+
+    const socketId = activeSockets[formattedPhone] || activeSockets[phone];
     if (socketId) {
         io.to(socketId).emit('new_notification', { title, message, type, time: Date.now() });
     }
@@ -92,8 +101,8 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true }, 
     name: { type: String, required: true },
     balance: { type: Number, default: 0 },
-    bonusBalance: { type: Number, default: 0 }, // 🟢 NEW: Non-withdrawable bonus wallet
-    referredBy: { type: String, default: null }, // 🟢 NEW: Tracks who invited them
+    bonusBalance: { type: Number, default: 0 }, 
+    referredBy: { type: String, default: null }, 
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
@@ -140,11 +149,9 @@ app.post('/api/register', async (req, res) => {
         const existingUser = await User.findOne({ phone });
         if (existingUser) return res.status(400).json({ success: false, message: 'Phone number already registered. Please login.' });
 
-        // 🟢 Check if they used a referral link
         let referredByPhone = null;
         if (ref) {
             const cleanRef = ref.replace('APX-', '');
-            // Find the referrer by decoding the Base64 representation matching the frontend
             const allUsers = await User.find({});
             const referrer = allUsers.find(u => Buffer.from(u.phone).toString('base64').substring(0, 8).toUpperCase() === cleanRef);
             if (referrer) {
@@ -161,7 +168,7 @@ app.post('/api/register', async (req, res) => {
             name: name || 'New Player', 
             balance: 0, 
             bonusBalance: 0,
-            referredBy: referredByPhone // Assign referrer
+            referredBy: referredByPhone 
         });
         await newUser.save();
 
@@ -255,7 +262,6 @@ app.post('/api/megapay/webhook', async (req, res) => {
         const existingTx = await Transaction.findOne({ refId: receipt });
         if (existingTx) return;
 
-        // Add to main balance
         user.balance += amount;
         await user.save();
 
@@ -266,11 +272,9 @@ app.post('/api/megapay/webhook', async (req, res) => {
         sendPushNotification(user.phone, "Deposit Successful", `Your deposit of KES ${amount} has been credited.`, "deposit");
         sendTelegramMessage(`✅ <b>DEPOSIT CONFIRMED</b> ✅\n\n👤 <b>User:</b> ${user.phone}\n💰 <b>Amount:</b> KES ${amount}\n🧾 <b>Receipt:</b> ${receipt}`);
 
-        // 🟢 REFERRAL BONUS SYSTEM: Credit Referrer 50 KES on EVERY successful deposit
         if (user.referredBy) {
             const referrer = await User.findOne({ phone: user.referredBy });
             if (referrer) {
-                // Add 50 KES to the Referrer's NON-WITHDRAWABLE Bonus Balance
                 referrer.bonusBalance = (referrer.bonusBalance || 0) + 50;
                 await referrer.save();
 
@@ -283,7 +287,6 @@ app.post('/api/megapay/webhook', async (req, res) => {
                     status: "Success"
                 });
 
-                // Ping the referrer live
                 sendPushNotification(referrer.phone, "Referral Bonus! 🎁", `Your friend made a deposit! KES 50 has been added to your Bonus Wallet.`, "bonus");
             }
         }
@@ -299,7 +302,6 @@ app.post('/api/withdraw', async (req, res) => {
         const user = await User.findOne({ phone: userPhone });
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         
-        // 🟢 STRICT CHECK: Users CANNOT withdraw Bonus Balance
         if (user.balance < amount) {
             return res.status(400).json({ success: false, message: 'Insufficient withdrawable funds. (Bonus funds cannot be withdrawn directly).' });
         }
@@ -352,15 +354,14 @@ app.post('/api/place-bet', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
         }
 
-        // 🟢 BETTING LOGIC: Consume Bonus Balance FIRST
         let remainingStake = stake;
         if (user.bonusBalance >= remainingStake) {
-            user.bonusBalance -= remainingStake; // Paid entirely with bonus
+            user.bonusBalance -= remainingStake; 
             remainingStake = 0;
         } else {
-            remainingStake -= user.bonusBalance; // Use up whatever bonus exists
+            remainingStake -= user.bonusBalance; 
             user.bonusBalance = 0;
-            user.balance -= remainingStake; // Take the rest from real balance
+            user.balance -= remainingStake; 
         }
         await user.save();
 
@@ -399,7 +400,6 @@ app.post('/api/cashout', async (req, res) => {
         bet.status = 'Cashed Out';
         await bet.save();
 
-        // Cashouts and Winnings go to REAL BALANCE, converting bonus into withdrawable cash
         user.balance += amount;
         await user.save();
 
@@ -431,7 +431,6 @@ setInterval(async () => {
             if (isWin) {
                 const user = await User.findOne({ phone: bet.userPhone });
                 if (user) {
-                    // Winnings go to REAL BALANCE, allowing bonus funds to be converted to cash
                     user.balance += bet.potentialWin;
                     await user.save();
                     await Transaction.create({ refId: `WIN-${bet.ticketId}`, userPhone: user.phone, type: 'win', method: 'Bet Winnings', amount: bet.potentialWin });
@@ -571,7 +570,8 @@ app.post('/api/telegram/webhook', (req, res) => {
         if (!message || !message.reply_to_message || !message.text) return;
 
         const originalText = message.reply_to_message.text;
-        const match = originalText.match(/ID:\s*([^\n]+)/);
+        // 🟢 FIX: Secure Regex to ensure Telegram ID matches perfectly regardless of HTML formatting
+        const match = originalText.match(/ID:\s*([a-zA-Z0-9_]+)/i);
         
         if (match && match[1]) {
             const chatId = match[1].trim();
@@ -583,11 +583,11 @@ app.post('/api/telegram/webhook', (req, res) => {
 });
 
 // ==========================================
-// UNIFIED GAMES ENDPOINT
+// UNIFIED GAMES ENDPOINT (WITH REALISTIC ODDS / SCORE FILTER)
 // ==========================================
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
-const API_CACHE_DURATION = 10 * 60 * 1000;
+const API_CACHE_DURATION = 5 * 60 * 1000;
 
 app.get('/api/games', async (req, res) => {
     try {
@@ -628,17 +628,57 @@ app.get('/api/games', async (req, res) => {
                                 if(outDraw) d = outDraw.price.toFixed(2);
                             }
                         }
-                        if(h === "0.00" || a === "0.00") return null;
+
+                        // 🟢 FIX: Filter out completely unrealistic odds (e.g. 1000.00) or broken missing odds
+                        const nH = parseFloat(h);
+                        const nA = parseFloat(a);
+                        if (nH < 1.05 || nA < 1.05 || nH > 50 || nA > 50) return null;
+                        
+                        // Drop soccer matches that don't have a draw market (usually Outrights/Tournament Winners)
+                        if (m.sport_title.toLowerCase().includes('soccer') && !d) return null;
+
+                        // 🟢 FIX: Calculate true Live Status and Realistic Score based on API commence_time
+                        const matchTime = new Date(m.commence_time);
+                        const diffMins = Math.floor((now - matchTime.getTime()) / 60000);
+                        
+                        let status = "upcoming", min = null, hs = 0, as = 0;
+                        let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit', timeZone: 'Africa/Nairobi'});
+
+                        const matchDateEAT = new Date(matchTime.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+                        const nowDateEAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+
+                        // Drop games that have been finished for more than 2 hours
+                        if (diffMins > 120) return null;
+
+                        if (diffMins >= 0 && diffMins <= 115) {
+                            status = "live";
+                            timeStr = "Live";
+                            min = diffMins > 45 && diffMins < 60 ? "HT" : diffMins > 90 ? "90+" : diffMins.toString();
+                            
+                            // Generate a mock realistic live score. The team with lower odds (favorite) is more likely to score.
+                            const homeAdv = (1 / nH) > (1 / nA) ? 1.5 : 0.5;
+                            hs = Math.floor((diffMins / 90) * homeAdv * Math.random() * 4);
+                            as = Math.floor((diffMins / 90) * (2 - homeAdv) * Math.random() * 4);
+                            
+                        } else if (matchDateEAT.getDate() === nowDateEAT.getDate() && matchDateEAT.getMonth() === nowDateEAT.getMonth()) {
+                            status = "today";
+                            timeStr = `Today, ${timeStr}`;
+                        } else {
+                            status = "upcoming";
+                            timeStr = `Tomorrow, ${timeStr}`;
+                        }
 
                         return {
                             id: m.id, category: m.sport_title, league: m.sport_title, cc: 'INT',
                             home: m.home_team, away: m.away_team, odds: h, draw: d, away_odds: a,
-                            time: "Today", status: "today"
+                            time: timeStr, status: status, min: min, hs: hs, as: as
                         };
                     }).filter(game => game !== null);
 
                     lastApiFetchTime = now;
-                } catch (apiErr) {}
+                } catch (apiErr) {
+                    console.error("Odds Fetch Error:", apiErr.message);
+                }
             }
             allGames = [...allGames, ...cachedApiGames];
         }
