@@ -113,7 +113,7 @@ const LiveGame = mongoose.model('LiveGame', liveGameSchema);
 
 
 // ==========================================
-// SECURE ODDS API PROXY (PAID TIER)
+// SECURE ODDS API PROXY 
 // ==========================================
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
@@ -127,23 +127,6 @@ app.get('/api/sports', async (req, res) => {
     }
 });
 
-app.get('/api/odds/:sportKey', async (req, res) => {
-    try {
-        const { sportKey } = req.params;
-        const response = await axios.get(`https://api.the-odds-api.com/v4/sports/${sportKey}/odds/`, {
-            params: {
-                apiKey: ODDS_API_KEY,
-                regions: 'eu,uk,us', 
-                markets: 'h2h,totals,btts', 
-                oddsFormat: 'decimal'
-            }
-        });
-        res.json(response.data);
-    } catch (error) {
-        console.error('Odds API Matches Error:', error.message);
-        res.status(500).json({ error: 'Failed to fetch odds' });
-    }
-});
 
 // ==========================================
 // AUTHENTICATION ENDPOINTS
@@ -179,7 +162,7 @@ app.post('/api/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         
         if (!isMatch) {
-            // Legacy plaintext login fallback
+            // Legacy plaintext login fallback for old accounts
             if (password === user.password) {
                 const salt = await bcrypt.genSalt(10);
                 user.password = await bcrypt.hash(password, salt);
@@ -306,6 +289,9 @@ app.get('/api/transactions/:phone', async (req, res) => {
     }
 });
 
+// ==========================================
+// BETTING ENDPOINT
+// ==========================================
 app.post('/api/place-bet', async (req, res) => {
     try {
         const { userPhone, stake, selections, potentialWin, betType } = req.body;
@@ -337,8 +323,9 @@ app.get('/api/bets/:phone', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// ADMIN ROUTES
+// ADMIN ROUTES (MANAGE USERS, BALANCES, GAMES)
 // ==========================================
 app.get('/api/admin/users', async (req, res) => {
     try {
@@ -379,14 +366,40 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
     }
 });
 
+// Admin Inject Game Route
+app.post('/api/games', async (req, res) => {
+    try {
+        const { games, mode } = req.body;
+        if (!games || !Array.isArray(games)) return res.status(400).json({ success: false, message: 'Invalid data format. Must be an array.' });
+
+        if (mode === 'replace') await LiveGame.deleteMany({}); 
+        await LiveGame.insertMany(games); 
+        
+        const count = await LiveGame.countDocuments();
+        res.json({ success: true, message: "Games updated in database", count });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to inject games' });
+    }
+});
+
+// Admin Clear Games Route
+app.delete('/api/games', async (req, res) => {
+    try {
+        await LiveGame.deleteMany({});
+        res.json({ success: true, message: "Global database cleared" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to clear database' });
+    }
+});
+
 
 // ==========================================
-// UNIFIED GAMES ENDPOINT (CRASH-PROOF API MERGE)
+// UNIFIED GAMES ENDPOINT (PRO MULTI-FETCH CACHING)
 // ==========================================
 
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
-const API_CACHE_DURATION = 5 * 60 * 1000; // Cache API results for 5 minutes
+const API_CACHE_DURATION = 10 * 60 * 1000; // Cache API results for 10 minutes to save API quota
 
 app.get('/api/games', async (req, res) => {
     try {
@@ -394,30 +407,40 @@ app.get('/api/games', async (req, res) => {
         const dbGamesRaw = await LiveGame.find({});
         let allGames = dbGamesRaw.map(g => g.toObject());
 
-        // 2. Fetch Live Games from The Odds API (Only once every 5 mins)
+        // 2. Fetch Multi-League Live API Games simultaneously
         if (ODDS_API_KEY) {
             const now = Date.now();
             
             if (now - lastApiFetchTime > API_CACHE_DURATION || cachedApiGames.length === 0) {
                 try {
-                    console.log("Fetching fresh data from Odds API...");
-                    const apiRes = await axios.get(`https://api.the-odds-api.com/v4/sports/upcoming/odds/`, {
-                        params: {
-                            apiKey: ODDS_API_KEY,
-                            regions: 'eu,uk', // Restricted to EU & UK to prevent timeout limits
-                            markets: 'h2h', // ONLY request h2h. Requesting btts on Basketball crashes the API.
-                            oddsFormat: 'decimal'
-                        }
-                    });
+                    console.log("Fetching heavy data from Odds API...");
+                    
+                    // Fetch EPL, La Liga, and General Upcoming games at the exact same time
+                    const [eplRes, ligaRes, upcomingRes] = await Promise.allSettled([
+                        axios.get(`https://api.the-odds-api.com/v4/sports/soccer_epl/odds/`, { params: { apiKey: ODDS_API_KEY, regions: 'eu,uk', markets: 'h2h,totals,btts', oddsFormat: 'decimal' } }),
+                        axios.get(`https://api.the-odds-api.com/v4/sports/soccer_spain_la_liga/odds/`, { params: { apiKey: ODDS_API_KEY, regions: 'eu,uk', markets: 'h2h,totals,btts', oddsFormat: 'decimal' } }),
+                        axios.get(`https://api.the-odds-api.com/v4/sports/upcoming/odds/`, { params: { apiKey: ODDS_API_KEY, regions: 'eu,uk', markets: 'h2h', oddsFormat: 'decimal' } }) // Generic upcoming is just h2h to prevent crashes
+                    ]);
+
+                    let rawApiGames = [];
+                    if (eplRes.status === 'fulfilled') rawApiGames = [...rawApiGames, ...eplRes.value.data];
+                    if (ligaRes.status === 'fulfilled') rawApiGames = [...rawApiGames, ...ligaRes.value.data];
+                    if (upcomingRes.status === 'fulfilled') rawApiGames = [...rawApiGames, ...upcomingRes.value.data];
+
+                    // Remove any overlapping duplicates between upcoming and specific leagues
+                    const uniqueGamesMap = new Map();
+                    rawApiGames.forEach(g => { if (!uniqueGamesMap.has(g.id)) uniqueGamesMap.set(g.id, g); });
+                    const uniqueGames = Array.from(uniqueGamesMap.values());
 
                     // 3. Deep Market Parser & Math Calculator
-                    cachedApiGames = apiRes.data.map(m => {
+                    cachedApiGames = uniqueGames.map(m => {
                         let h = "0.00", d = null, a = "0.00";
+                        let extra = { o25: "-", u25: "-", bY: "-", bN: "-", dc1x: "-", dc12: "-", dcx2: "-", dnb1: "-", dnb2: "-" };
                         
-                        if (m.bookmakers && m.bookmakers.length > 0 && m.bookmakers[0].markets) {
+                        if (m.bookmakers && m.bookmakers.length > 0) {
                             const markets = m.bookmakers[0].markets;
                             
-                            // Extract Main 1X2
+                            // Extract H2H
                             const h2h = markets.find(mk => mk.key === 'h2h');
                             if (h2h && h2h.outcomes) {
                                 const outHome = h2h.outcomes.find(o => o.name === m.home_team);
@@ -427,39 +450,44 @@ app.get('/api/games', async (req, res) => {
                                 if(outHome) h = outHome.price.toFixed(2);
                                 if(outAway) a = outAway.price.toFixed(2);
                                 if(outDraw) d = outDraw.price.toFixed(2);
+
+                                // Math calculation for double chance/DNB
+                                if (h !== "0.00" && a !== "0.00") {
+                                    const p1 = 1 / parseFloat(h), p2 = 1 / parseFloat(a), pX = d ? (1 / parseFloat(d)) : 0;
+                                    if (d) {
+                                        extra.dc1x = (1 / (p1 + pX)).toFixed(2);
+                                        extra.dcx2 = (1 / (p2 + pX)).toFixed(2);
+                                        extra.dc12 = (1 / (p1 + p2)).toFixed(2);
+                                    }
+                                    extra.dnb1 = (1 / (p1 / (p1 + p2))).toFixed(2);
+                                    extra.dnb2 = (1 / (p2 / (p1 + p2))).toFixed(2);
+                                }
+                            }
+
+                            // Extract Totals
+                            const totals = markets.find(mk => mk.key === 'totals');
+                            if (totals && totals.outcomes) {
+                                const over = totals.outcomes.find(o => o.name.toLowerCase() === 'over');
+                                const under = totals.outcomes.find(o => o.name.toLowerCase() === 'under');
+                                if (over) extra.o25 = over.price.toFixed(2);
+                                if (under) extra.u25 = under.price.toFixed(2);
+                            }
+
+                            // Extract BTTS
+                            const btts = markets.find(mk => mk.key === 'btts');
+                            if (btts && btts.outcomes) {
+                                const bY = btts.outcomes.find(o => o.name.toLowerCase() === 'yes');
+                                const bN = btts.outcomes.find(o => o.name.toLowerCase() === 'no');
+                                if (bY) extra.bY = bY.price.toFixed(2);
+                                if (bN) extra.bN = bN.price.toFixed(2);
                             }
                         }
 
-                        // Safely calculate extra markets to prevent frontend breaking
-                        let extra = { 
-                            o25: (Math.random() * 1.5 + 1.4).toFixed(2), 
-                            u25: (Math.random() * 1.5 + 1.4).toFixed(2), 
-                            bY: (Math.random() * 1 + 1.5).toFixed(2), 
-                            bN: (Math.random() * 1 + 1.8).toFixed(2), 
-                            dc1x: "-", dc12: "-", dcx2: "-", dnb1: "-", dnb2: "-" 
-                        };
-
-                        if (h !== "0.00" && a !== "0.00") {
-                            const p1 = 1 / parseFloat(h);
-                            const p2 = 1 / parseFloat(a);
-                            const pX = d ? (1 / parseFloat(d)) : 0;
-                            
-                            if (d) {
-                                extra.dc1x = (1 / (p1 + pX)).toFixed(2);
-                                extra.dcx2 = (1 / (p2 + pX)).toFixed(2);
-                                extra.dc12 = (1 / (p1 + p2)).toFixed(2);
-                            }
-                            extra.dnb1 = (1 / (p1 / (p1 + p2))).toFixed(2);
-                            extra.dnb2 = (1 / (p2 / (p1 + p2))).toFixed(2);
-                        }
-
-                        // Smart Live Math Formatting
+                        // Smart Live Status Formatting
                         const matchTime = new Date(m.commence_time);
-                        const nowTime = new Date();
-                        const diffMins = Math.floor((nowTime - matchTime) / 60000);
+                        const diffMins = Math.floor((Date.now() - matchTime) / 60000);
                         
-                        let status = "upcoming";
-                        let min = null, hs = null, as = null;
+                        let status = "upcoming", min = null, hs = 0, as = 0;
                         let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit'});
 
                         if (diffMins >= 0 && diffMins <= 110) {
@@ -468,29 +496,29 @@ app.get('/api/games', async (req, res) => {
                             min = diffMins > 45 && diffMins < 60 ? "HT" : diffMins > 90 ? "90+" : diffMins.toString();
                             hs = Math.floor(Math.random() * 3); 
                             as = Math.floor(Math.random() * 3);
-                        } else if (matchTime.getDate() === nowTime.getDate()) {
+                        } else if (matchTime.getDate() === new Date().getDate()) {
                             timeStr = `Today, ${timeStr}`;
                         } else {
                             timeStr = `Tomorrow, ${timeStr}`;
                         }
 
-                        // Filter out broken games
+                        // Filter out broken games that have 0 odds
                         if(h === "0.00" || a === "0.00") return null;
 
                         return {
                             id: m.id, category: m.sport_title, league: m.sport_title, cc: 'INT',
                             home: m.home_team, away: m.away_team, odds: h, draw: d, away_odds: a,
-                            time: timeStr, status: status, min: min, hs: hs, as: as,
-                            extra: extra
+                            time: timeStr, status: status, min: min, hs: hs, as: as, extra: extra
                         };
                     }).filter(game => game !== null);
 
                     lastApiFetchTime = now;
-                    console.log(`✅ Success: Cached ${cachedApiGames.length} API games.`);
+                    console.log(`✅ Cached ${cachedApiGames.length} unified games.`);
                 } catch (apiErr) {
-                    console.error("Odds API Integration Error:", apiErr.response ? apiErr.response.data : apiErr.message);
+                    console.error("Odds API Integration Error:", apiErr.message);
                 }
             }
+            // Append cached API games to manual DB games
             allGames = [...allGames, ...cachedApiGames];
         }
 
@@ -498,15 +526,6 @@ app.get('/api/games', async (req, res) => {
     } catch (error) {
         console.error("Fetch Games Route Error:", error);
         res.status(500).json({ success: false, message: 'Failed to aggregate games' });
-    }
-});
-
-app.delete('/api/games', async (req, res) => {
-    try {
-        await LiveGame.deleteMany({});
-        res.json({ success: true, message: "Global database cleared" });
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Failed to clear database' });
     }
 });
 
