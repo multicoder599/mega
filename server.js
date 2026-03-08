@@ -48,7 +48,10 @@ const activeSockets = {}; // Maps phone numbers to socket IDs
 io.on('connection', (socket) => {
     // Register user phone to target specific notifications
     socket.on('register_user', (phone) => {
-        if(phone) activeSockets[phone] = socket.id;
+        if(phone) {
+            activeSockets[phone] = socket.id;
+            console.log(`User ${phone} connected to socket`);
+        }
     });
 
     // Join specific chat room for live support
@@ -167,7 +170,6 @@ app.post('/api/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         
         if (!isMatch) {
-            // Legacy plaintext login fallback for old accounts
             if (password === user.password) {
                 const salt = await bcrypt.genSalt(10);
                 user.password = await bcrypt.hash(password, salt);
@@ -368,10 +370,8 @@ setInterval(async () => {
         const openBets = await Bet.find({ status: 'Open' });
         
         for (let bet of openBets) {
-            // 80% chance it stays open
             if (Math.random() > 0.20) continue; 
 
-            // 40% chance to win, 60% chance to lose
             const isWin = Math.random() < 0.40;
             
             bet.status = isWin ? 'Won' : 'Lost';
@@ -392,7 +392,7 @@ setInterval(async () => {
     } catch (error) { 
         console.error("Settlement Error:", error.message); 
     }
-}, 60 * 60 * 1000); // Runs every 60 minutes
+}, 60 * 60 * 1000);
 
 // ==========================================
 // ADMIN ROUTES & PUSH ALERTS
@@ -436,7 +436,6 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
     }
 });
 
-// Trigger a push alert from Admin Panel
 app.post('/api/admin/push-alert', (req, res) => {
     const { phone, title, message } = req.body;
     if(phone === 'ALL') {
@@ -514,7 +513,6 @@ app.get('/api/chat/sync', (req, res) => {
     res.json({ success: true, messages: activeChats[chatId] || [] });
 });
 
-// Catch replies from Telegram -> Route to Website instantly via Socket
 app.post('/api/telegram/webhook', (req, res) => {
     res.sendStatus(200); 
     
@@ -616,11 +614,16 @@ app.get('/api/games', async (req, res) => {
                             }
                         }
 
+                        // TIME AND LIVE STATUS CALCULATION (Adapted for EAT / Kenyan Time)
                         const matchTime = new Date(m.commence_time);
-                        const diffMins = Math.floor((Date.now() - matchTime) / 60000);
+                        const now = Date.now();
+                        const diffMins = Math.floor((now - matchTime.getTime()) / 60000);
                         
                         let status = "upcoming", min = null, hs = 0, as = 0;
-                        let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit'});
+                        let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit', timeZone: 'Africa/Nairobi'});
+
+                        const matchDateEAT = new Date(matchTime.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+                        const nowDateEAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
 
                         if (diffMins >= 0 && diffMins <= 110) {
                             status = "live";
@@ -628,9 +631,11 @@ app.get('/api/games', async (req, res) => {
                             min = diffMins > 45 && diffMins < 60 ? "HT" : diffMins > 90 ? "90+" : diffMins.toString();
                             hs = Math.floor(Math.random() * 3); 
                             as = Math.floor(Math.random() * 3);
-                        } else if (matchTime.getDate() === new Date().getDate()) {
+                        } else if (matchDateEAT.getDate() === nowDateEAT.getDate() && matchDateEAT.getMonth() === nowDateEAT.getMonth()) {
+                            status = "today";
                             timeStr = `Today, ${timeStr}`;
                         } else {
+                            status = "upcoming";
                             timeStr = `Tomorrow, ${timeStr}`;
                         }
 
