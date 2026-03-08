@@ -14,23 +14,10 @@ const server = http.createServer(app); // Wrap express in HTTP server
 // ==========================================
 // CORS & SOCKET CONFIGURATION
 // ==========================================
-const allowedOrigins = [
-    'http://localhost:3000',
-    'http://127.0.0.1:5500',
-    /https:\/\/.*\.surge\.sh$/ 
-];
-
 app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin || allowedOrigins.some(domain => 
-            typeof domain === 'string' ? domain === origin : domain.test(origin)
-        )) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    credentials: true
+    origin: "*", // 🟢 ALLOWS ALL CONNECTIONS (Localhost, files, any domain)
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: false // Must be false when origin is "*"
 }));
 
 const io = new Server(server, {
