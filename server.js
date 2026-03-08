@@ -357,8 +357,10 @@ setInterval(async () => {
         const openBets = await Bet.find({ status: 'Open' });
         
         for (let bet of openBets) {
+            // 80% chance it stays open
             if (Math.random() > 0.20) continue; 
 
+            // 40% chance to win, 60% chance to lose
             const isWin = Math.random() < 0.40;
             
             bet.status = isWin ? 'Won' : 'Lost';
@@ -379,7 +381,7 @@ setInterval(async () => {
     } catch (error) { 
         console.error("Settlement Error:", error.message); 
     }
-}, 60 * 60 * 1000);
+}, 60 * 60 * 1000); // Runs every 60 minutes
 
 // ==========================================
 // ADMIN ROUTES & PUSH ALERTS
@@ -423,6 +425,7 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
     }
 });
 
+// Trigger a push alert from Admin Panel
 app.post('/api/admin/push-alert', (req, res) => {
     const { phone, title, message } = req.body;
     if(phone === 'ALL') {
@@ -500,6 +503,7 @@ app.get('/api/chat/sync', (req, res) => {
     res.json({ success: true, messages: activeChats[chatId] || [] });
 });
 
+// Catch replies from Telegram -> Route to Website instantly via Socket
 app.post('/api/telegram/webhook', (req, res) => {
     res.sendStatus(200); 
     
