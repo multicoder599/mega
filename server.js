@@ -393,14 +393,20 @@ app.post('/api/cashout', async (req, res) => {
 });
 
 // ==========================================
-// BACKGROUND BET SETTLEMENT SIMULATOR
+// 🟢 FAST BACKGROUND BET SETTLEMENT SIMULATOR
 // ==========================================
 setInterval(async () => {
     try {
+        // Find all Open sports/jackpot bets
         const openBets = await Bet.find({ status: 'Open', type: { $ne: 'Aviator' } });
+        
         for (let bet of openBets) {
-            if (Math.random() > 0.20) continue; 
-            const isWin = Math.random() < 0.40;
+            // Only settle bets that are at least 2 minutes old (simulating match progress)
+            const timeDiff = Date.now() - new Date(bet.createdAt).getTime();
+            if (timeDiff < 2 * 60 * 1000) continue; 
+
+            // 40% chance to Win for testing
+            const isWin = Math.random() < 0.40; 
             
             bet.status = isWin ? 'Won' : 'Lost';
             await bet.save();
@@ -410,15 +416,26 @@ setInterval(async () => {
                 if (user) {
                     user.balance += bet.potentialWin;
                     await user.save();
-                    await Transaction.create({ refId: `WIN-${bet.ticketId}`, userPhone: user.phone, type: 'win', method: 'Bet Winnings', amount: bet.potentialWin });
+                    
+                    await Transaction.create({ 
+                        refId: `WIN-${bet.ticketId}`, 
+                        userPhone: user.phone, 
+                        type: 'win', 
+                        method: 'Bet Winnings', 
+                        amount: bet.potentialWin 
+                    });
                     
                     sendPushNotification(user.phone, "Bet Won! 🥳", `Ticket ${bet.ticketId} won! KES ${bet.potentialWin} added to your balance.`, "win");
                 }
+            } else {
+                // Send a push notification even if they lose so they know it settled
+                sendPushNotification(bet.userPhone, "Bet Lost 😔", `Ticket ${bet.ticketId} didn't go your way. Better luck next time!`, "bet");
             }
         }
-    } catch (error) { console.error("Settlement Error:", error.message); }
-}, 60 * 60 * 1000); 
-
+    } catch (error) { 
+        console.error("Settlement Error:", error.message); 
+    }
+}, 60 * 1000); // Runs every 60 seconds instead of every hour
 // ==========================================
 // ADMIN ROUTES & PUSH ALERTS
 // ==========================================
