@@ -59,25 +59,27 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// 🟢 FIX: Removed strict enums & added defaults to prevent My Bets crashes
 const betSchema = new mongoose.Schema({
     ticketId: { type: String, required: true, unique: true },
     userPhone: { type: String, required: true },
     stake: { type: Number, required: true },
-    potentialWin: { type: Number, required: true },
-    selections: { type: Array, required: true },
-    type: { type: String, enum: ['Sports', 'Jackpot', 'Aviator', 'Casino'], default: 'Sports' },
-    status: { type: String, enum: ['Open', 'Won', 'Lost', 'Cashed Out'], default: 'Open' },
+    potentialWin: { type: Number, default: 0 }, 
+    selections: { type: Array, default: [] }, 
+    type: { type: String, default: 'Sports' }, 
+    status: { type: String, default: 'Open' }, 
     createdAt: { type: Date, default: Date.now }
 });
 const Bet = mongoose.model('Bet', betSchema);
 
+// 🟢 FIX: Removed strict enums for generic transaction types
 const transactionSchema = new mongoose.Schema({
     refId: { type: String, required: true, unique: true }, 
     userPhone: { type: String, required: true },
-    type: { type: String, enum: ['deposit', 'withdraw', 'bet', 'bonus', 'win', 'cashout'], required: true },
+    type: { type: String, required: true }, 
     method: { type: String, required: true },
     amount: { type: Number, required: true }, 
-    status: { type: String, enum: ['Pending', 'Success', 'Failed'], default: 'Success' },
+    status: { type: String, default: 'Success' }, 
     createdAt: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
@@ -93,31 +95,24 @@ const LiveGame = mongoose.model('LiveGame', liveGameSchema);
 // ==========================================
 // 🟢 NOTIFICATIONS (EMBEDDED DB LOGIC)
 // ==========================================
-
-// Endpoint to fetch unread notifications (Polled by app.js)
 app.get('/api/notifications/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.params.phone });
         if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-        // Filter out only unread notifications
         const unreadNotifs = user.notifications.filter(n => n.isRead === false);
 
         if (unreadNotifs.length > 0) {
-            // Instantly mark them as read in the array
             user.notifications.forEach(n => n.isRead = true);
-            user.markModified('notifications'); // Tells Mongoose the array changed
+            user.markModified('notifications'); 
             await user.save();
         }
-
-        // Return only the unread ones to trigger the UI popup (reversed so newest is first)
         res.json({ success: true, notifications: unreadNotifs.slice().reverse() });
     } catch (e) { 
         res.status(500).json({ success: false }); 
     }
 });
 
-// Universal function to push notification to a user's embedded array
 async function sendPushNotification(phone, title, message, type) {
     try {
         let formattedPhone = phone.replace(/\D/g, '');
@@ -133,7 +128,6 @@ async function sendPushNotification(phone, title, message, type) {
             createdAt: new Date()
         };
 
-        // Push directly to the user document regardless of formatting
         await User.updateMany(
             { $or: [{ phone: phone }, { phone: formattedPhone }] },
             { $push: { notifications: notifObj } }
@@ -310,6 +304,15 @@ app.get('/api/transactions/:phone', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to fetch transactions' }); }
 });
 
+
+// ==========================================
+// PING TEST ENDPOINT (FOR CRON-JOB.ORG)
+// ==========================================
+app.get('/api/test', (req, res) => {
+    res.json({ success: true, message: "Server is awake!" });
+});
+
+
 // ==========================================
 // SPORTS BETTING ENDPOINTS
 // ==========================================
@@ -361,7 +364,10 @@ app.post('/api/cashout', async (req, res) => {
             user.balance += amount;
             await user.save();
             
-            await Transaction.create({ refId: ticketId, userPhone, type: 'win', method: 'Aviator Win', amount: amount });
+            // Mark Aviator bet as Cashed Out
+            await Bet.updateOne({ ticketId: ticketId }, { $set: { status: 'Cashed Out' } });
+
+            await Transaction.create({ refId: ticketId + '-WIN', userPhone, type: 'win', method: 'Aviator Win', amount: amount });
             sendPushNotification(user.phone, "Aviator Cashout! ✈️", `You successfully cashed out KES ${amount.toFixed(2)}.`, "cashout");
             
             return res.json({ success: true, message: 'Cashout successful', newBalance: user.balance });
@@ -391,7 +397,7 @@ app.post('/api/cashout', async (req, res) => {
 // ==========================================
 setInterval(async () => {
     try {
-        const openBets = await Bet.find({ status: 'Open' });
+        const openBets = await Bet.find({ status: 'Open', type: { $ne: 'Aviator' } });
         for (let bet of openBets) {
             if (Math.random() > 0.20) continue; 
             const isWin = Math.random() < 0.40;
@@ -446,7 +452,6 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to delete user account' }); }
 });
 
-// 🟢 NEW ADMIN BROADCAST (Uses Embedded Array Logic)
 app.post('/api/admin/push-alert', async (req, res) => {
     try {
         const { phone, title, message } = req.body;
@@ -461,7 +466,6 @@ app.post('/api/admin/push-alert', async (req, res) => {
                 createdAt: new Date()
             };
 
-            // This single command instantly drops the notification into EVERY user's array
             await User.updateMany({}, { $push: { notifications: bObj } });
             
         } else {
@@ -548,9 +552,6 @@ app.get('/api/games', async (req, res) => {
                         let status = "upcoming", min = null, hs = 0, as = 0;
                         let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit', timeZone: 'Africa/Nairobi'});
 
-                        const matchDateEAT = new Date(matchTime.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
-                        const nowDateEAT = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
-
                         if (diffMins > 120) return null;
 
                         if (diffMins >= 0 && diffMins <= 115) {
@@ -562,12 +563,9 @@ app.get('/api/games', async (req, res) => {
                             hs = Math.floor((diffMins / 90) * homeAdv * Math.random() * 4);
                             as = Math.floor((diffMins / 90) * (2 - homeAdv) * Math.random() * 4);
                             
-                        } else if (matchDateEAT.getDate() === nowDateEAT.getDate() && matchDateEAT.getMonth() === nowDateEAT.getMonth()) {
-                            status = "today";
-                            timeStr = `Today, ${timeStr}`;
                         } else {
                             status = "upcoming";
-                            timeStr = `Tomorrow, ${timeStr}`;
+                            timeStr = `Upcoming, ${timeStr}`;
                         }
 
                         return {
@@ -578,7 +576,7 @@ app.get('/api/games', async (req, res) => {
                     }).filter(game => game !== null);
 
                     lastApiFetchTime = now;
-                } catch (apiErr) { console.error("Odds Fetch Error"); }
+                } catch (apiErr) {}
             }
             allGames = [...allGames, ...cachedApiGames];
         }
@@ -587,7 +585,7 @@ app.get('/api/games', async (req, res) => {
 });
 
 // ==========================================
-// AVIATOR GAME ENGINE (SERVER-SIDE MATH)
+// 🟢 AVIATOR GAME ENGINE & REFUND LOGIC
 // ==========================================
 let aviatorState = {
     status: 'WAITING',
@@ -609,6 +607,9 @@ function runAviatorLoop() {
                 aviatorState.status = 'CRASHED';
                 aviatorState.history.unshift(aviatorState.crashPoint);
                 if(aviatorState.history.length > 20) aviatorState.history.pop();
+                
+                // Set all open Aviator bets to 'Lost' automatically upon crash
+                Bet.updateMany({ type: 'Aviator', status: 'Open' }, { $set: { status: 'Lost' } }).catch(e=>{});
                 
                 setTimeout(() => {
                     aviatorState.status = 'WAITING';
@@ -636,11 +637,41 @@ app.post('/api/aviator/bet', async (req, res) => {
     try {
         const { userPhone, amount } = req.body;
         const user = await User.findOne({ phone: userPhone });
-        
-        if (user && user.balance >= amount) {
-            user.balance -= amount;
+        if (!user) return res.status(404).json({ success: false });
+
+        const betAmt = Number(amount);
+
+        // 🟢 Refund Logic (User cancelled before takeoff)
+        if (betAmt < 0) {
+            user.balance += Math.abs(betAmt);
             await user.save();
-            await Transaction.create({ refId: `AV-BET-${Date.now()}`, userPhone, type: 'bet', method: 'Aviator Bet', amount: -amount });
+            await Transaction.create({ refId: `AV-REF-${Date.now()}`, userPhone, type: 'refund', method: 'Aviator Refund', amount: Math.abs(betAmt) });
+            
+            // Delete the bet record so it doesn't show up in history
+            await Bet.findOneAndDelete({ userPhone: userPhone, type: 'Aviator', status: 'Open' });
+            
+            return res.json({ success: true, newBalance: user.balance });
+        }
+
+        // 🟢 Standard Bet Placement
+        if (user.balance >= betAmt) {
+            user.balance -= betAmt;
+            await user.save();
+            const tId = `AV-BET-${Date.now()}`;
+            
+            await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Aviator Bet', amount: -betAmt });
+            
+            // Log Aviator to "My Bets"
+            await Bet.create({
+                ticketId: tId,
+                userPhone: user.phone,
+                stake: betAmt,
+                potentialWin: 0,
+                type: 'Aviator',
+                status: 'Open',
+                selections: [{ match: "Aviator Round", market: "Crash", pick: "Auto", odds: 1.0 }]
+            });
+
             res.json({ success: true, newBalance: user.balance });
         } else {
             res.status(400).json({ success: false });
