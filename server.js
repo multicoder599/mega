@@ -54,12 +54,11 @@ const userSchema = new mongoose.Schema({
     balance: { type: Number, default: 0 },
     bonusBalance: { type: Number, default: 0 },
     referredBy: { type: String, default: null }, 
-    notifications: { type: Array, default: [] }, // 🟢 NEW: Embedded Notifications Array
+    notifications: { type: Array, default: [] }, // Embedded Notifications Array
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
 
-// 🟢 FIX: Removed strict enums & added defaults to prevent My Bets crashes
 const betSchema = new mongoose.Schema({
     ticketId: { type: String, required: true, unique: true },
     userPhone: { type: String, required: true },
@@ -72,7 +71,6 @@ const betSchema = new mongoose.Schema({
 });
 const Bet = mongoose.model('Bet', betSchema);
 
-// 🟢 FIX: Removed strict enums for generic transaction types
 const transactionSchema = new mongoose.Schema({
     refId: { type: String, required: true, unique: true }, 
     userPhone: { type: String, required: true },
@@ -149,7 +147,8 @@ app.post('/api/register', async (req, res) => {
 
         let referredByPhone = null;
         if (ref) {
-            const cleanRef = ref.replace('APX-', '');
+            // Allows compatibility with both APX (old) and MGO (new) referral tags
+            const cleanRef = ref.replace(/(APX-|MGO-)/i, '');
             const allUsers = await User.find({});
             const referrer = allUsers.find(u => Buffer.from(u.phone).toString('base64').substring(0, 8).toUpperCase() === cleanRef);
             if (referrer) referredByPhone = referrer.phone;
@@ -161,7 +160,7 @@ app.post('/api/register', async (req, res) => {
         const newUser = new User({ phone, password: hashedPassword, name: name || 'New Player', balance: 0, bonusBalance: 0, referredBy: referredByPhone });
         await newUser.save();
 
-        sendTelegramMessage(`🚨 <b>NEW USER REGISTRATION</b> 🚨\n\n👤 <b>Name:</b> ${newUser.name}\n📱 <b>Phone:</b> ${newUser.phone}\n🔗 <b>Referred By:</b> ${referredByPhone || 'None'}`);
+        sendTelegramMessage(`🚨 <b>NEW MEGAODDS REGISTRATION</b> 🚨\n\n👤 <b>Name:</b> ${newUser.name}\n📱 <b>Phone:</b> ${newUser.phone}\n🔗 <b>Referred By:</b> ${referredByPhone || 'None'}`);
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, bonusBalance: newUser.bonusBalance, phone: newUser.phone } });
     } catch (error) { res.status(500).json({ success: false, message: 'Server error' }); }
 });
@@ -202,7 +201,7 @@ app.post('/api/deposit', async (req, res) => {
         if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
 
-        const APP_URL = process.env.APP_URL || 'https://apex-efwz.onrender.com';
+        const APP_URL = process.env.APP_URL || 'https://megaodds.onrender.com';
         const reference = "DEP" + Date.now();
 
         const payload = {
@@ -211,7 +210,7 @@ app.post('/api/deposit', async (req, res) => {
             amount: amount, 
             msisdn: formattedPhone,
             callback_url: `${APP_URL}/api/megapay/webhook`,
-            description: "ApexBet Deposit", 
+            description: "MegaOdds Deposit", 
             reference: reference
         };
 
@@ -357,7 +356,7 @@ app.post('/api/cashout', async (req, res) => {
     try {
         const { ticketId, userPhone, amount } = req.body;
         
-        if (ticketId && ticketId.startsWith('AV-')) {
+        if (ticketId && ticketId.startsWith('CRASH-') || ticketId.startsWith('AV-')) {
             const user = await User.findOne({ phone: userPhone });
             if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
             
@@ -367,8 +366,8 @@ app.post('/api/cashout', async (req, res) => {
             // Mark Aviator bet as Cashed Out
             await Bet.updateOne({ ticketId: ticketId }, { $set: { status: 'Cashed Out' } });
 
-            await Transaction.create({ refId: ticketId + '-WIN', userPhone, type: 'win', method: 'Aviator Win', amount: amount });
-            sendPushNotification(user.phone, "Aviator Cashout! ✈️", `You successfully cashed out KES ${amount.toFixed(2)}.`, "cashout");
+            await Transaction.create({ refId: ticketId + '-WIN', userPhone, type: 'win', method: 'Crash Win', amount: amount });
+            sendPushNotification(user.phone, "Crash Cashout! ✈️", `You successfully cashed out KES ${amount.toFixed(2)}.`, "cashout");
             
             return res.json({ success: true, message: 'Cashout successful', newBalance: user.balance });
         }
@@ -435,7 +434,8 @@ setInterval(async () => {
     } catch (error) { 
         console.error("Settlement Error:", error.message); 
     }
-}, 60 * 1000); // Runs every 60 seconds instead of every hour
+}, 60 * 1000); // Runs every 60 seconds
+
 // ==========================================
 // ADMIN ROUTES & PUSH ALERTS
 // ==========================================
@@ -510,6 +510,7 @@ app.delete('/api/games', async (req, res) => {
         res.json({ success: true, message: "Global database cleared" });
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to clear database' }); }
 });
+
 
 // ==========================================
 // UNIFIED GAMES ENDPOINT
@@ -601,8 +602,9 @@ app.get('/api/games', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to aggregate games' }); }
 });
 
+
 // ==========================================
-// 🟢 AVIATOR GAME ENGINE & REFUND LOGIC
+// 🟢 CRASH GAME ENGINE & REFUND LOGIC
 // ==========================================
 let aviatorState = {
     status: 'WAITING',
@@ -662,7 +664,7 @@ app.post('/api/aviator/bet', async (req, res) => {
         if (betAmt < 0) {
             user.balance += Math.abs(betAmt);
             await user.save();
-            await Transaction.create({ refId: `AV-REF-${Date.now()}`, userPhone, type: 'refund', method: 'Aviator Refund', amount: Math.abs(betAmt) });
+            await Transaction.create({ refId: `CRASH-REF-${Date.now()}`, userPhone, type: 'refund', method: 'Crash Refund', amount: Math.abs(betAmt) });
             
             // Delete the bet record so it doesn't show up in history
             await Bet.findOneAndDelete({ userPhone: userPhone, type: 'Aviator', status: 'Open' });
@@ -674,9 +676,9 @@ app.post('/api/aviator/bet', async (req, res) => {
         if (user.balance >= betAmt) {
             user.balance -= betAmt;
             await user.save();
-            const tId = `AV-BET-${Date.now()}`;
+            const tId = `CRASH-BET-${Date.now()}`;
             
-            await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Aviator Bet', amount: -betAmt });
+            await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Crash Bet', amount: -betAmt });
             
             // Log Aviator to "My Bets"
             await Bet.create({
@@ -686,7 +688,7 @@ app.post('/api/aviator/bet', async (req, res) => {
                 potentialWin: 0,
                 type: 'Aviator',
                 status: 'Open',
-                selections: [{ match: "Aviator Round", market: "Crash", pick: "Auto", odds: 1.0 }]
+                selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }]
             });
 
             res.json({ success: true, newBalance: user.balance });
@@ -696,10 +698,11 @@ app.post('/api/aviator/bet', async (req, res) => {
     } catch(e) { res.status(500).json({ success: false }); }
 });
 
+
 // ==========================================
 // START SERVER
 // ==========================================
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-    console.log(`🚀 ApexBet Server live on port ${PORT}`);
+    console.log(`🚀 MegaOdds Server live on port ${PORT}`);
 });
