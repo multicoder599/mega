@@ -409,7 +409,7 @@ app.post('/api/cashout', async (req, res) => {
 setInterval(async () => {
     try {
         // Find all Open sports/jackpot bets
-        const openBets = await Bet.find({ status: 'Open', type: { $ne: 'Aviator' } });
+        const openBets = await Bet.find({ status: 'Open', type: { $nin: ['Aviator', 'Virtuals'] } });
         
         for (let bet of openBets) {
             // Only settle bets that are at least 2 minutes old (simulating match progress)
@@ -612,6 +612,168 @@ app.get('/api/games', async (req, res) => {
         }
         res.json({ success: true, games: allGames });
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to aggregate games' }); }
+});
+
+
+// ==========================================
+// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE 🟢
+// ==========================================
+const V_TEAMS = [
+    { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
+    { name: "Burnley", color: "#6C1D45", short: "BUR" }, { name: "Everton", color: "#003399", short: "EVE" },
+    { name: "Sheffield U", color: "#EE2737", short: "SHU" }, { name: "London Blues", color: "#034694", short: "CHE" },
+    { name: "Wolves", color: "#FDB913", short: "WOL" }, { name: "Liverpool", color: "#C8102E", short: "LIV" },
+    { name: "West Ham", color: "#7A263A", short: "WHU" }, { name: "Leicester", color: "#003090", short: "LEI" },
+    { name: "Newcastle", color: "#241F20", short: "NEW" }, { name: "Fulham", color: "#000000", short: "FUL" },
+    { name: "Tottenham", color: "#132257", short: "TOT" }, { name: "Aston V", color: "#95BFE5", short: "AVL" },
+    { name: "Palace", color: "#1B458F", short: "CRY" }, { name: "Leeds", color: "#FFCD00", short: "LEE" },
+    { name: "West Brom", color: "#091453", short: "WBA" }, { name: "Southampton", color: "#D71920", short: "SOU" },
+    { name: "Brighton", color: "#0057B8", short: "BHA" }, { name: "London Reds", color: "#E03A3E", short: "ARS" }
+];
+
+let vRounds = [];
+let vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
+let vResultsHistory = [];
+
+function generateVirtualRound(matchday, startTime) {
+    let shuffled = [...V_TEAMS].sort(() => 0.5 - Math.random());
+    let matches = [];
+    
+    for(let i=0; i<10; i++) {
+        matches.push({
+            id: `MD${matchday}-${i}`,
+            home: shuffled[i*2], away: shuffled[i*2 + 1],
+            hs: 0, as: 0,
+            hFlash: false, aFlash: false,
+            odds: {
+                '1X2': [ {lbl: '1', val: (1.5 + Math.random() * 1.5).toFixed(2)}, {lbl: 'X', val: (2.8 + Math.random() * 1.5).toFixed(2)}, {lbl: '2', val: (2.5 + Math.random() * 2.5).toFixed(2)} ],
+                'O/U 2.5': [ {lbl: 'Over', val: (1.6 + Math.random()).toFixed(2)}, {lbl: 'Under', val: (1.8 + Math.random()).toFixed(2)} ],
+                'GG/NG': [ {lbl: 'GG', val: (1.7 + Math.random()).toFixed(2)}, {lbl: 'NG', val: (1.9 + Math.random()).toFixed(2)} ],
+                'Double Chance': [ {lbl: '1X', val: (1.2 + Math.random()*0.2).toFixed(2)}, {lbl: '12', val: (1.3 + Math.random()*0.2).toFixed(2)}, {lbl: 'X2', val: (1.5 + Math.random()*0.3).toFixed(2)} ]
+            }
+        });
+    }
+
+    return {
+        id: 'R' + matchday,
+        matchday: matchday,
+        startTime: startTime,
+        status: 'BETTING', 
+        liveMin: "0'",
+        matches: matches
+    };
+}
+
+// Initialize Virtuals
+let nowV = Date.now();
+let firstStart = nowV + 15000; 
+for(let i=0; i<15; i++) {
+    vRounds.push(generateVirtualRound(i+1, firstStart + (i * 120000)));
+}
+
+// Virtuals Game Loop
+setInterval(async () => {
+    let now = Date.now();
+
+    for (let r of vRounds) {
+        let timeUntilLive = r.startTime - now;
+
+        if (timeUntilLive > 0) {
+            r.status = 'BETTING';
+        } else if (timeUntilLive <= 0 && timeUntilLive > -55000) {
+            r.status = 'LIVE';
+            let elapsedLive = Math.abs(timeUntilLive) / 1000; 
+            
+            if(elapsedLive <= 25) {
+                r.liveMin = Math.floor((elapsedLive / 25) * 45) + "'";
+            } else if(elapsedLive > 25 && elapsedLive <= 30) {
+                r.liveMin = "HT";
+            } else {
+                r.liveMin = Math.floor(45 + ((elapsedLive - 30) / 25) * 45) + "'";
+            }
+
+            r.matches.forEach(m => {
+                m.hFlash = false; m.aFlash = false;
+                if (r.liveMin !== "HT" && Math.random() < 0.03) { 
+                    if(Math.random() < 0.55) { m.hs++; m.hFlash = true; }
+                    else { m.as++; m.aFlash = true; }
+                }
+            });
+
+        } else if (timeUntilLive <= -55000 && r.status !== 'FINISHED') {
+            r.status = 'FINISHED';
+            r.liveMin = "FT";
+            
+            // Server-Side Settlement
+            const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open' });
+            for (let b of pendingVBets) {
+                const matchId = b.selections[0].matchId; 
+                const m = r.matches.find(mx => mx.id === matchId);
+                
+                if(m) {
+                    let isWin = false;
+                    const market = b.selections[0].market;
+                    const pick = b.selections[0].pick;
+
+                    if(market === '1X2') {
+                        if(pick === '1' && m.hs > m.as) isWin = true;
+                        if(pick === 'X' && m.hs === m.as) isWin = true;
+                        if(pick === '2' && m.hs < m.as) isWin = true;
+                    } else if (market === 'O/U 2.5') {
+                        if(pick === 'Over' && (m.hs + m.as) > 2.5) isWin = true;
+                        if(pick === 'Under' && (m.hs + m.as) < 2.5) isWin = true;
+                    } else if (market === 'GG/NG') {
+                        const gg = m.hs > 0 && m.as > 0;
+                        if(pick === 'GG' && gg) isWin = true;
+                        if(pick === 'NG' && !gg) isWin = true;
+                    } else if (market === 'Double Chance') {
+                        if(pick === '1X' && m.hs >= m.as) isWin = true;
+                        if(pick === '12' && m.hs !== m.as) isWin = true;
+                        if(pick === 'X2' && m.hs <= m.as) isWin = true;
+                    }
+
+                    b.status = isWin ? 'Won' : 'Lost';
+                    await b.save();
+
+                    if(isWin) {
+                        const user = await User.findOne({ phone: b.userPhone });
+                        if(user) {
+                            user.balance += b.potentialWin;
+                            await user.save();
+                            await Transaction.create({ refId: `VWIN-${b.ticketId}`, userPhone: user.phone, type: 'win', method: 'Virtual Win', amount: b.potentialWin });
+                        }
+                    }
+                }
+            }
+
+            // Update Server Standings
+            r.matches.forEach(m => {
+                vResultsHistory.unshift({ md: r.matchday, match: `${m.home.short} - ${m.away.short}`, score: `${m.hs} : ${m.as}` });
+                let hTeam = vStandings.find(t => t.name === m.home.name);
+                let aTeam = vStandings.find(t => t.name === m.away.name);
+                hTeam.p++; aTeam.p++;
+                hTeam.gd += (m.hs - m.as); aTeam.gd += (m.as - m.hs);
+                if(m.hs > m.as) hTeam.pts += 3;
+                else if (m.hs < m.as) aTeam.pts += 3;
+                else { hTeam.pts += 1; aTeam.pts += 1; }
+            });
+
+            // Generate Next Round
+            let lastRound = vRounds[vRounds.length - 1];
+            vRounds.push(generateVirtualRound(lastRound.matchday + 1, lastRound.startTime + 120000));
+            vRounds.shift(); // Remove oldest to keep array small
+        }
+    }
+}, 1000);
+
+app.get('/api/virtuals/state', (req, res) => {
+    res.json({
+        success: true,
+        serverTime: Date.now(),
+        rounds: vRounds,
+        standings: vStandings,
+        resultsHistory: vResultsHistory.slice(0, 50) 
+    });
 });
 
 
