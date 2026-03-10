@@ -34,17 +34,20 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 // TELEGRAM BOT UTILITY (For Admin Alerts)
 // ==========================================
 function sendTelegramMessage(message) {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+        console.log("⚠️ Telegram credentials missing. Message not sent.");
+        return;
+    }
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
-        .catch(err => console.error("Telegram Notification Error:", err.message));
+        .catch(err => console.error("Telegram Notification Error:", err.response ? err.response.data : err.message));
 }
 
 // ==========================================
 // MONGODB CONNECTION & MODELS
 // ==========================================
 mongoose.connect(MONGO_URI)
-  .then(() => console.log('✅ Connected to MongoDB successfully!'))
+  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 const userSchema = new mongoose.Schema({
@@ -147,7 +150,6 @@ app.post('/api/register', async (req, res) => {
 
         let referredByPhone = null;
         if (ref) {
-            // Allows compatibility with both APX (old) and MGO (new) referral tags
             const cleanRef = ref.replace(/(APX-|MGO-)/i, '');
             const allUsers = await User.find({});
             const referrer = allUsers.find(u => Buffer.from(u.phone).toString('base64').substring(0, 8).toUpperCase() === cleanRef);
@@ -318,12 +320,19 @@ app.get('/api/test', (req, res) => {
 app.post('/api/place-bet', async (req, res) => {
     try {
         const { userPhone, stake, selections, potentialWin, betType } = req.body;
+        
+        if (!stake || stake <= 0) return res.status(400).json({ success: false, message: 'Invalid stake amount.' });
+
         const user = await User.findOne({ phone: userPhone });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
         const totalAvailable = user.balance + (user.bonusBalance || 0);
 
-        if (!user || totalAvailable < stake) return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
+        if (totalAvailable < stake) {
+            return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
+        }
 
+        // Deduct from Bonus Balance first, then Main Balance
         let remainingStake = stake;
         if (user.bonusBalance >= remainingStake) {
             user.bonusBalance -= remainingStake; 
@@ -341,6 +350,9 @@ app.post('/api/place-bet', async (req, res) => {
 
         await Transaction.create({ refId: ticketId, userPhone, type: 'bet', method: `${betType || 'Sports'} Bet`, amount: -stake });
 
+        // 🟢 SEND TELEGRAM NOTIFICATION TO ADMIN
+        sendTelegramMessage(`🎯 <b>NEW BET PLACED</b> 🎯\n\n👤 <b>User:</b> ${userPhone}\n💸 <b>Stake:</b> KES ${stake}\n🏆 <b>Potential Win:</b> KES ${potentialWin}\n🎫 <b>Ticket:</b> ${ticketId}\n📊 <b>Type:</b> ${betType || 'Sports'}`);
+
         res.json({ success: true, newBalance: user.balance, newBonus: user.bonusBalance, ticketId: newBet.ticketId });
     } catch (error) { res.status(500).json({ success: false, message: 'Bet placement failed' }); }
 });
@@ -356,7 +368,7 @@ app.post('/api/cashout', async (req, res) => {
     try {
         const { ticketId, userPhone, amount } = req.body;
         
-        if (ticketId && ticketId.startsWith('CRASH-') || ticketId.startsWith('AV-')) {
+        if (ticketId && (ticketId.startsWith('CRASH-') || ticketId.startsWith('AV-'))) {
             const user = await User.findOne({ phone: userPhone });
             if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
             
@@ -672,7 +684,7 @@ app.post('/api/aviator/bet', async (req, res) => {
             return res.json({ success: true, newBalance: user.balance });
         }
 
-        // 🟢 FIX: Standard Bet Placement utilizing Bonus Balance
+        // 🟢 Standard Bet Placement utilizing Bonus Balance
         const totalAvailable = user.balance + (user.bonusBalance || 0);
 
         if (totalAvailable >= betAmt) {
@@ -701,6 +713,9 @@ app.post('/api/aviator/bet', async (req, res) => {
                 status: 'Open',
                 selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }]
             });
+
+            // 🟢 SEND TELEGRAM NOTIFICATION TO ADMIN
+            sendTelegramMessage(`✈️ <b>NEW AVIATOR BET</b> ✈️\n\n👤 <b>User:</b> ${userPhone}\n💸 <b>Stake:</b> KES ${betAmt}\n🎫 <b>Ticket:</b> ${tId}`);
 
             res.json({ success: true, newBalance: user.balance });
         } else {
