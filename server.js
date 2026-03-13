@@ -432,7 +432,7 @@ app.get('/api/bets/:phone', async (req, res) => {
     }
 });
 
-// 🟢 NEW: Admin Route to Inject Fixed Results for Real Sports
+// 🟢 Admin Route to Inject Fixed Results for Real Sports
 app.post('/api/admin/set-result', async (req, res) => {
     try {
         const { matchId, hs, as } = req.body;
@@ -445,7 +445,6 @@ app.post('/api/admin/set-result', async (req, res) => {
         game.status = 'FINISHED';
         await game.save();
 
-        // Call the settlement engine
         await settleSportsBetsForMatch(matchId, game.hs, game.as);
 
         res.json({ success: true, message: `Match ${matchId} updated and bets settled.` });
@@ -454,7 +453,7 @@ app.post('/api/admin/set-result', async (req, res) => {
     }
 });
 
-// 🟢 NEW: ADVANCED 2-Hour Auto-Settlement & Multi-Bet Engine
+// 🟢 ADVANCED 2-Hour Auto-Settlement & Multi-Bet Engine
 async function settleSportsBetsForMatch(matchId, hs, as) {
     try {
         // Find ALL OPEN bets that contain this specific match
@@ -555,7 +554,6 @@ setInterval(async () => {
         });
 
         for (let game of expiredGames) {
-            // Auto generate realistic fallback result if admin hasn't provided one
             game.hs = Math.floor(Math.random() * 4);
             game.as = Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
@@ -661,7 +659,6 @@ app.post('/api/games', async (req, res) => {
         const { games, mode } = req.body;
         if (mode === 'replace') await LiveGame.deleteMany({}); 
         
-        // Ensure manual games have proper Date objects for the 120-minute checking
         const parsedGames = games.map(g => ({
             ...g,
             startTime: g.startTime ? new Date(g.startTime) : new Date()
@@ -685,7 +682,7 @@ app.delete('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED)
+// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED) 🟢
 // ==========================================
 const V_TEAMS = [
     { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
@@ -741,13 +738,16 @@ function createVirtualRound(matchday, startTime) {
 
 async function bootVirtualEngine() {
     let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
+    
     if (!state || state.rounds.length === 0) {
         currentVSeason = 1;
         vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
+        
         let firstStart = Date.now() + 15000; 
         for(let i=1; i<=38; i++) {
             vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
         }
+        
         await VirtualState.create({ currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds });
     } else {
         currentVSeason = state.currentSeason;
@@ -756,6 +756,7 @@ async function bootVirtualEngine() {
     }
 }
 
+// 🟢 THE FIX FOR VIRTUALS JSON ROOT IS HERE 🟢
 bootVirtualEngine().then(() => {
     let vRestartFlag = false;
 
@@ -867,13 +868,19 @@ bootVirtualEngine().then(() => {
     }, 1000);
 });
 
+// 🟢 CRITICAL FIX: Wrapped response in "state" object to match frontend expectation
 app.get('/api/virtuals/state', async (req, res) => {
     try {
         const dbResults = await VirtualResult.find({ season: currentVSeason }).sort({ createdAt: -1 }).limit(50);
         res.json({
-            success: true, serverTime: Date.now(), currentSeason: currentVSeason,
-            rounds: vRounds, standings: vStandings,
-            resultsHistory: dbResults.map(r => ({ md: r.matchday, match: `${r.home} - ${r.away}`, score: `${r.hs} : ${r.as}` }))
+            success: true, 
+            state: {
+                serverTime: Date.now(), 
+                currentSeason: currentVSeason,
+                rounds: vRounds, 
+                standingsData: vStandings,
+                resultsData: dbResults.map(r => ({ md: r.matchday, match: `${r.home} - ${r.away}`, score: `${r.hs} : ${r.as}` }))
+            }
         });
     } catch(e) { 
         res.status(500).json({ success: false }); 
