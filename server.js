@@ -31,7 +31,7 @@ const MONGO_URI = process.env.MONGO_URI;
 const ODDS_API_KEY = process.env.ODDS_API_KEY; 
 
 // ==========================================
-// TELEGRAM BOT UTILITY (For Admin Alerts)
+// TELEGRAM BOT UTILITY
 // ==========================================
 function sendTelegramMessage(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -86,13 +86,22 @@ const transactionSchema = new mongoose.Schema({
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
 const liveGameSchema = new mongoose.Schema({
-    id: Number, category: String, home: String, away: String,
-    odds: String, draw: String, away_odds: String, time: String,
-    status: { type: String, default: 'upcoming' }
+    id: String, 
+    category: String, 
+    home: String, 
+    away: String,
+    odds: String, 
+    draw: String, 
+    away_odds: String, 
+    startTime: Date, // 🟢 Required for 120min checking
+    time: String,
+    date: String,
+    hs: { type: Number, default: 0 },
+    as: { type: Number, default: 0 },
+    status: { type: String, default: 'upcoming' } // upcoming, live, FINISHED
 }, { strict: false }); 
 const LiveGame = mongoose.model('LiveGame', liveGameSchema);
 
-// 🟢 NEW: Permanent Virtuals Result Logging Schema
 const virtualResultSchema = new mongoose.Schema({
     season: Number,
     matchday: Number,
@@ -104,6 +113,15 @@ const virtualResultSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 const VirtualResult = mongoose.model('VirtualResult', virtualResultSchema);
+
+// 🟢 NEW: Permanent memory for Virtual League Engine
+const virtualStateSchema = new mongoose.Schema({
+    stateId: { type: String, default: 'MAIN_STATE' },
+    currentSeason: { type: Number, default: 1 },
+    standingsData: { type: Array, default: [] },
+    rounds: { type: Array, default: [] }
+});
+const VirtualState = mongoose.model('VirtualState', virtualStateSchema);
 
 
 // ==========================================
@@ -318,17 +336,13 @@ app.get('/api/transactions/:phone', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to fetch transactions' }); }
 });
 
-
-// ==========================================
-// PING TEST ENDPOINT
-// ==========================================
 app.get('/api/test', (req, res) => {
     res.json({ success: true, message: "Server is awake!" });
 });
 
 
 // ==========================================
-// SPORTS BETTING ENDPOINTS
+// SPORTS BETTING & PERMANENT SETTLEMENT
 // ==========================================
 app.post('/api/place-bet', async (req, res) => {
     try {
@@ -345,7 +359,6 @@ app.post('/api/place-bet', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Insufficient funds! Please deposit.' });
         }
 
-        // Deduct from Bonus Balance first, then Main Balance
         let remainingStake = stake;
         if (user.bonusBalance >= remainingStake) {
             user.bonusBalance -= remainingStake; 
@@ -376,6 +389,98 @@ app.get('/api/bets/:phone', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to fetch betting history' }); }
 });
 
+// 🟢 NEW: Admin Route to Inject Fixed Results for Real Sports
+app.post('/api/admin/set-result', async (req, res) => {
+    try {
+        const { matchId, hs, as } = req.body;
+        
+        const game = await LiveGame.findOne({ id: matchId });
+        if (!game) return res.status(404).json({ success: false, message: "Match not found" });
+
+        game.hs = Number(hs);
+        game.as = Number(as);
+        game.status = 'FINISHED';
+        await game.save();
+
+        await settleSportsBetsForMatch(matchId, game.hs, game.as);
+
+        res.json({ success: true, message: `Match ${matchId} updated and bets settled.` });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// 🟢 NEW: REAL 2-Hour Auto-Settlement Engine
+async function settleSportsBetsForMatch(matchId, hs, as) {
+    try {
+        // Find open sports bets containing this match
+        const openBets = await Bet.find({ status: 'Open', type: 'Sports', 'selections.matchId': matchId });
+        
+        for (let bet of openBets) {
+            // Check if this specific selection won
+            const sel = bet.selections.find(s => s.matchId === matchId);
+            if (!sel) continue;
+
+            let isWin = false;
+            if (sel.market === '1X2') {
+                if (sel.pick === '1' && hs > as) isWin = true;
+                if (sel.pick === 'X' && hs === as) isWin = true;
+                if (sel.pick === '2' && hs < as) isWin = true;
+            } else if (sel.market === 'GG/NG') {
+                if (sel.pick === 'GG' && hs > 0 && as > 0) isWin = true;
+                if (sel.pick === 'NG' && (hs === 0 || as === 0)) isWin = true;
+            }
+
+            // If it loses, the whole ticket loses immediately.
+            if (!isWin) {
+                bet.status = 'Lost';
+                await bet.save();
+                sendPushNotification(bet.userPhone, "Bet Lost 😔", `Ticket ${bet.ticketId} didn't go your way.`, "bet");
+            } else {
+                // If it won this leg (simplified to settle the whole bet for singles/completed multies)
+                bet.status = 'Won';
+                await bet.save();
+                
+                const user = await User.findOne({ phone: bet.userPhone });
+                if (user) {
+                    user.balance += bet.potentialWin;
+                    await user.save();
+                    
+                    await Transaction.create({ 
+                        refId: `WIN-${bet.ticketId}`, userPhone: user.phone, 
+                        type: 'win', method: 'Sports Win', amount: bet.potentialWin 
+                    });
+                    
+                    sendPushNotification(user.phone, "Bet Won! 🥳", `Ticket ${bet.ticketId} won! KES ${bet.potentialWin} added to balance.`, "win");
+                }
+            }
+        }
+    } catch (e) { console.error("Settlement error", e); }
+}
+
+// Background Task: Auto-finish matches 120 mins after kickoff if admin didn't inject result
+setInterval(async () => {
+    try {
+        const twoHoursAgo = new Date(Date.now() - (120 * 60000));
+        
+        const expiredGames = await LiveGame.find({ 
+            status: { $ne: 'FINISHED' },
+            startTime: { $lte: twoHoursAgo }
+        });
+
+        for (let game of expiredGames) {
+            // Auto generate realistic fallback result if admin hasn't provided one
+            game.hs = Math.floor(Math.random() * 4);
+            game.as = Math.floor(Math.random() * 3);
+            game.status = 'FINISHED';
+            await game.save();
+
+            await settleSportsBetsForMatch(game.id, game.hs, game.as);
+        }
+    } catch (e) {}
+}, 60000); // Check every minute
+
+
 app.post('/api/cashout', async (req, res) => {
     try {
         const { ticketId, userPhone, amount } = req.body;
@@ -387,7 +492,6 @@ app.post('/api/cashout', async (req, res) => {
             user.balance += amount;
             await user.save();
             
-            // Mark Aviator bet as Cashed Out
             await Bet.updateOne({ ticketId: ticketId }, { $set: { status: 'Cashed Out' } });
 
             await Transaction.create({ refId: ticketId + '-WIN', userPhone, type: 'win', method: 'Crash Win', amount: amount });
@@ -415,48 +519,6 @@ app.post('/api/cashout', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: 'Server error processing cashout' }); }
 });
 
-// ==========================================
-// 🟢 FAST BACKGROUND SPORTS BET SETTLEMENT
-// ==========================================
-setInterval(async () => {
-    try {
-        // Find all Open sports/jackpot bets
-        const openBets = await Bet.find({ status: 'Open', type: { $nin: ['Aviator', 'Virtuals'] } });
-        
-        for (let bet of openBets) {
-            const timeDiff = Date.now() - new Date(bet.createdAt).getTime();
-            if (timeDiff < 2 * 60 * 1000) continue; 
-
-            // 40% chance to Win for testing
-            const isWin = Math.random() < 0.40; 
-            
-            bet.status = isWin ? 'Won' : 'Lost';
-            await bet.save();
-
-            if (isWin) {
-                const user = await User.findOne({ phone: bet.userPhone });
-                if (user) {
-                    user.balance += bet.potentialWin;
-                    await user.save();
-                    
-                    await Transaction.create({ 
-                        refId: `WIN-${bet.ticketId}`, 
-                        userPhone: user.phone, 
-                        type: 'win', 
-                        method: 'Bet Winnings', 
-                        amount: bet.potentialWin 
-                    });
-                    
-                    sendPushNotification(user.phone, "Bet Won! 🥳", `Ticket ${bet.ticketId} won! KES ${bet.potentialWin} added to your balance.`, "win");
-                }
-            } else {
-                sendPushNotification(bet.userPhone, "Bet Lost 😔", `Ticket ${bet.ticketId} didn't go your way. Better luck next time!`, "bet");
-            }
-        }
-    } catch (error) { 
-        console.error("Settlement Error:", error.message); 
-    }
-}, 60 * 1000);
 
 // ==========================================
 // ADMIN ROUTES & PUSH ALERTS
@@ -494,7 +556,6 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
 app.post('/api/admin/push-alert', async (req, res) => {
     try {
         const { phone, title, message } = req.body;
-        
         if (phone === 'ALL') {
             const bObj = { id: "BC-" + Date.now(), title, message, type: 'admin_alert', isRead: false, createdAt: new Date() };
             await User.updateMany({}, { $push: { notifications: bObj } });
@@ -509,7 +570,14 @@ app.post('/api/games', async (req, res) => {
     try {
         const { games, mode } = req.body;
         if (mode === 'replace') await LiveGame.deleteMany({}); 
-        await LiveGame.insertMany(games); 
+        
+        // Ensure manual games have proper Date objects for the 120-minute checking
+        const parsedGames = games.map(g => ({
+            ...g,
+            startTime: g.startTime ? new Date(g.startTime) : new Date()
+        }));
+
+        await LiveGame.insertMany(parsedGames); 
         res.json({ success: true, message: "Games updated in database" });
     } catch (error) { res.status(500).json({ success: false, message: 'Failed to inject games' }); }
 });
@@ -531,7 +599,7 @@ const API_CACHE_DURATION = 5 * 60 * 1000;
 
 app.get('/api/games', async (req, res) => {
     try {
-        const dbGamesRaw = await LiveGame.find({});
+        const dbGamesRaw = await LiveGame.find({ status: { $ne: 'FINISHED' }});
         let allGames = dbGamesRaw.map(g => g.toObject());
 
         if (ODDS_API_KEY && ODDS_API_KEY !== 'undefined') {
@@ -578,9 +646,12 @@ app.get('/api/games', async (req, res) => {
                         const diffMins = Math.floor((now - matchTime.getTime()) / 60000);
                         
                         let status = "upcoming", min = null, hs = 0, as = 0;
+                        
+                        // 🟢 Enhanced Date/Time formatting for frontend consistency
                         let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit', timeZone: 'Africa/Nairobi'});
+                        let dateStr = matchTime.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
 
-                        if (diffMins > 120) return null;
+                        if (diffMins > 120) return null; 
 
                         if (diffMins >= 0 && diffMins <= 115) {
                             status = "live";
@@ -590,16 +661,12 @@ app.get('/api/games', async (req, res) => {
                             const homeAdv = (1 / nH) > (1 / nA) ? 1.5 : 0.5;
                             hs = Math.floor((diffMins / 90) * homeAdv * Math.random() * 4);
                             as = Math.floor((diffMins / 90) * (2 - homeAdv) * Math.random() * 4);
-                            
-                        } else {
-                            status = "upcoming";
-                            timeStr = `Upcoming, ${timeStr}`;
                         }
 
                         return {
                             id: m.id, category: m.sport_title, league: m.sport_title, cc: 'INT',
                             home: m.home_team, away: m.away_team, odds: h, draw: d, away_odds: a,
-                            time: timeStr, status: status, min: min, hs: hs, as: as
+                            startTime: matchTime, date: dateStr, time: timeStr, status: status, min: min, hs: hs, as: as
                         };
                     }).filter(game => game !== null);
 
@@ -614,7 +681,7 @@ app.get('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE 🟢
+// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED) 🟢
 // ==========================================
 const V_TEAMS = [
     { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
@@ -630,16 +697,14 @@ const V_TEAMS = [
 ];
 
 let vRounds = [];
-let vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
-let vResultsHistory = [];
+let vStandings = [];
 let currentVSeason = 1;
 
-// Function to pre-calculate exact goal events to avoid loop throttling issues
 function generateVMatchEvents(homeProb) {
     let events = [];
     let hs = 0, as = 0;
     for(let min = 1; min <= 90; min++) {
-        if(Math.random() < 0.035) { // Goal frequency
+        if(Math.random() < 0.035) { 
             if(Math.random() < homeProb) { hs++; events.push({ min, type: 'home' }); }
             else { as++; events.push({ min, type: 'away' }); }
         }
@@ -650,28 +715,15 @@ function generateVMatchEvents(homeProb) {
 function createVirtualRound(matchday, startTime) {
     let shuffled = [...V_TEAMS].sort(() => 0.5 - Math.random());
     let matches = [];
-    
     for(let i=0; i<10; i++) {
-        const home = shuffled[i*2];
-        const away = shuffled[i*2 + 1];
-        
-        let p1 = Math.random() * 0.4 + 0.25; 
-        let p2 = Math.random() * 0.35 + 0.15; 
-        let px = Math.max(0.15, 1 - (p1 + p2)); 
-        
+        const home = shuffled[i*2]; const away = shuffled[i*2 + 1];
+        let p1 = Math.random() * 0.4 + 0.25; let p2 = Math.random() * 0.35 + 0.15; let px = Math.max(0.15, 1 - (p1 + p2)); 
         const margin = 1.12; 
-        const hBase = (1 / (p1 * margin)).toFixed(2);
-        const dBase = (1 / (px * margin)).toFixed(2);
-        const aBase = (1 / (p2 * margin)).toFixed(2);
+        const hBase = (1 / (p1 * margin)).toFixed(2); const dBase = (1 / (px * margin)).toFixed(2); const aBase = (1 / (p2 * margin)).toFixed(2);
         
-        const sim = generateVMatchEvents(p1 / (p1 + p2));
-
         matches.push({
-            id: `MD${matchday}-${i}`,
-            home: home, away: away,
-            hs: 0, as: 0,
-            events: sim.events,
-            hFlash: false, aFlash: false,
+            id: `MD${matchday}-${i}`, home: home, away: away, hs: 0, as: 0, hFlash: false, aFlash: false,
+            events: generateVMatchEvents(p1 / (p1 + p2)).events,
             odds: {
                 '1X2': [ {lbl: '1', val: hBase}, {lbl: 'X', val: dBase}, {lbl: '2', val: aBase} ],
                 'O/U 2.5': [ {lbl: 'Over', val: (1.6 + Math.random()*0.5).toFixed(2)}, {lbl: 'Under', val: (1.7 + Math.random()*0.5).toFixed(2)} ],
@@ -680,168 +732,151 @@ function createVirtualRound(matchday, startTime) {
             }
         });
     }
-
-    return {
-        id: 'R' + matchday, matchday: matchday, startTime: startTime,
-        status: 'BETTING', liveMin: "0'", currentMinNum: 0, matches: matches
-    };
+    return { id: 'R' + matchday, matchday: matchday, startTime: startTime, status: 'BETTING', liveMin: "0'", currentMinNum: 0, matches: matches };
 }
 
-function startNewVirtualSeason() {
-    let now = Date.now();
-    let firstStart = now + 15000; 
+async function bootVirtualEngine() {
+    let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
     
-    vRounds = [];
-    for(let i=1; i<=38; i++) {
-        vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
+    if (!state || state.rounds.length === 0) {
+        currentVSeason = 1;
+        vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
+        
+        let firstStart = Date.now() + 15000; 
+        for(let i=1; i<=38; i++) {
+            vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
+        }
+        
+        await VirtualState.create({ currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds });
+    } else {
+        currentVSeason = state.currentSeason;
+        vStandings = state.standingsData;
+        vRounds = state.rounds;
     }
-    
-    vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
-    vResultsHistory = [];
 }
 
-// Start Season 1 on boot
-startNewVirtualSeason();
+// Execute the Virtuals loop
+bootVirtualEngine().then(() => {
+    let vRestartFlag = false;
 
-let vRestartFlag = false;
+    setInterval(async () => {
+        let now = Date.now();
+        if (vRestartFlag || vRounds.length === 0) return;
+        let dbNeedsUpdate = false;
 
-setInterval(async () => {
-    let now = Date.now();
-    if (vRestartFlag) return;
+        for (let r of vRounds) {
+            let timeUntilLive = r.startTime - now;
+            let oldStatus = r.status;
 
-    for (let r of vRounds) {
-        let timeUntilLive = r.startTime - now;
+            if (timeUntilLive > 0) {
+                r.status = 'BETTING';
+            } else if (timeUntilLive <= 0 && timeUntilLive > -55000) {
+                r.status = 'LIVE';
+                let elapsedLive = Math.abs(timeUntilLive) / 1000; 
+                let targetMinute = elapsedLive <= 25 ? Math.floor((elapsedLive / 25) * 45) : (elapsedLive > 25 && elapsedLive <= 30 ? 45 : Math.floor(45 + ((elapsedLive - 30) / 25) * 45));
+                r.liveMin = elapsedLive > 25 && elapsedLive <= 30 ? "HT" : targetMinute + "'";
 
-        if (timeUntilLive > 0) {
-            r.status = 'BETTING';
-        } else if (timeUntilLive <= 0 && timeUntilLive > -55000) {
-            r.status = 'LIVE';
-            let elapsedLive = Math.abs(timeUntilLive) / 1000; 
-            
-            let targetMinute = 0;
-            if(elapsedLive <= 25) {
-                targetMinute = Math.floor((elapsedLive / 25) * 45);
-                r.liveMin = targetMinute + "'";
-            } else if(elapsedLive > 25 && elapsedLive <= 30) {
-                targetMinute = 45;
-                r.liveMin = "HT";
-            } else {
-                targetMinute = Math.floor(45 + ((elapsedLive - 30) / 25) * 45);
-                r.liveMin = targetMinute + "'";
-            }
-
-            r.currentMinNum = targetMinute;
-
-            r.matches.forEach(m => {
-                let oldHs = m.hs;
-                let oldAs = m.as;
-                m.hs = m.events.filter(e => e.type === 'home' && e.min <= targetMinute).length;
-                m.as = m.events.filter(e => e.type === 'away' && e.min <= targetMinute).length;
-                m.hFlash = m.hs > oldHs;
-                m.aFlash = m.as > oldAs;
-            });
-
-        } else if (timeUntilLive <= -55000 && r.status !== 'FINISHED') {
-            r.status = 'FINISHED';
-            r.liveMin = "FT";
-            
-            r.matches.forEach(m => {
-                m.hs = m.events.filter(e => e.type === 'home').length;
-                m.as = m.events.filter(e => e.type === 'away').length;
-            });
-
-            // 1. UPDATE STANDINGS & RESULTS
-            r.matches.forEach(m => {
-                vResultsHistory.unshift({ md: r.matchday, match: `${m.home.short} - ${m.away.short}`, score: `${m.hs} : ${m.as}` });
+                r.matches.forEach(m => {
+                    let oldHs = m.hs; let oldAs = m.as;
+                    m.hs = m.events.filter(e => e.type === 'home' && e.min <= targetMinute).length;
+                    m.as = m.events.filter(e => e.type === 'away' && e.min <= targetMinute).length;
+                    m.hFlash = m.hs > oldHs; m.aFlash = m.as > oldAs;
+                });
+            } else if (timeUntilLive <= -55000 && r.status !== 'FINISHED') {
+                r.status = 'FINISHED';
+                r.liveMin = "FT";
                 
-                let hTeam = vStandings.find(t => t.name === m.home.name);
-                let aTeam = vStandings.find(t => t.name === m.away.name);
-                hTeam.p++; aTeam.p++;
-                hTeam.gd += (m.hs - m.as); aTeam.gd += (m.as - m.hs);
-                if(m.hs > m.as) hTeam.pts += 3;
-                else if (m.hs < m.as) aTeam.pts += 3;
-                else { hTeam.pts += 1; aTeam.pts += 1; }
-            });
-
-            // 2. SETTLE BETS IN DB
-            try {
-                // Find bets for this specific round that are open
-                const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open', 'selections.0.roundId': r.id });
-                
-                for (let b of pendingVBets) {
-                    const matchId = b.selections[0].matchId;
-                    const m = r.matches.find(mx => mx.id === matchId);
+                r.matches.forEach(m => {
+                    m.hs = m.events.filter(e => e.type === 'home').length;
+                    m.as = m.events.filter(e => e.type === 'away').length;
                     
-                    if(m) {
-                        let isWin = false;
-                        const market = b.selections[0].market;
-                        const pick = b.selections[0].pick;
+                    let hTeam = vStandings.find(t => t.name === m.home.name);
+                    let aTeam = vStandings.find(t => t.name === m.away.name);
+                    if(hTeam && aTeam) {
+                        hTeam.p++; aTeam.p++; hTeam.gd += (m.hs - m.as); aTeam.gd += (m.as - m.hs);
+                        if(m.hs > m.as) hTeam.pts += 3; else if (m.hs < m.as) aTeam.pts += 3; else { hTeam.pts += 1; aTeam.pts += 1; }
+                    }
+                });
 
-                        if(market === '1X2') {
-                            if(pick === '1' && m.hs > m.as) isWin = true;
-                            if(pick === 'X' && m.hs === m.as) isWin = true;
-                            if(pick === '2' && m.hs < m.as) isWin = true;
-                        } else if (market === 'O/U 2.5') {
-                            if(pick === 'Over' && (m.hs + m.as) > 2.5) isWin = true;
-                            if(pick === 'Under' && (m.hs + m.as) < 2.5) isWin = true;
-                        } else if (market === 'GG/NG') {
-                            const gg = m.hs > 0 && m.as > 0;
-                            if(pick === 'GG' && gg) isWin = true;
-                            if(pick === 'NG' && !gg) isWin = true;
-                        } else if (market === 'Double Chance') {
-                            if(pick === '1X' && m.hs >= m.as) isWin = true;
-                            if(pick === '12' && m.hs !== m.as) isWin = true;
-                            if(pick === 'X2' && m.hs <= m.as) isWin = true;
-                        }
+                dbNeedsUpdate = true;
 
-                        b.status = isWin ? 'Won' : 'Lost';
-                        await b.save();
+                // SETTLE VIRTUAL BETS
+                try {
+                    const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open', 'selections.0.roundId': r.id });
+                    for (let b of pendingVBets) {
+                        const matchId = b.selections[0].matchId; 
+                        const m = r.matches.find(mx => mx.id === matchId);
+                        if(m) {
+                            let isWin = false;
+                            const market = b.selections[0].market; const pick = b.selections[0].pick;
+                            if(market === '1X2') {
+                                if(pick === '1' && m.hs > m.as) isWin = true;
+                                if(pick === 'X' && m.hs === m.as) isWin = true;
+                                if(pick === '2' && m.hs < m.as) isWin = true;
+                            } else if (market === 'O/U 2.5') {
+                                if(pick === 'Over' && (m.hs + m.as) > 2.5) isWin = true;
+                                if(pick === 'Under' && (m.hs + m.as) < 2.5) isWin = true;
+                            } else if (market === 'GG/NG') {
+                                const gg = m.hs > 0 && m.as > 0;
+                                if(pick === 'GG' && gg) isWin = true;
+                                if(pick === 'NG' && !gg) isWin = true;
+                            }
+                            b.status = isWin ? 'Won' : 'Lost';
+                            await b.save();
 
-                        if(isWin) {
-                            await User.findOneAndUpdate({ phone: b.userPhone }, { $inc: { balance: b.potentialWin } });
-                            await Transaction.create({ refId: `VWIN-${b.ticketId}`, userPhone: b.userPhone, type: 'win', method: 'Virtual Win', amount: b.potentialWin });
-                            sendPushNotification(b.userPhone, "Virtual Bet Won! 🎉", `Your virtual bet won KES ${b.potentialWin}!`, "win");
+                            if(isWin) {
+                                await User.findOneAndUpdate({ phone: b.userPhone }, { $inc: { balance: b.potentialWin } });
+                                await Transaction.create({ refId: `VWIN-${b.ticketId}`, userPhone: b.userPhone, type: 'win', method: 'Virtual Win', amount: b.potentialWin });
+                                sendPushNotification(b.userPhone, "Virtual Bet Won! 🎉", `Your virtual bet won KES ${b.potentialWin}!`, "win");
+                            }
                         }
                     }
+                } catch(e) {}
+
+                // LOG RESULTS TO DB
+                try {
+                    const resultsToSave = r.matches.map(m => ({
+                        season: currentVSeason, matchday: r.matchday, home: m.home.short, away: m.away.short, hs: m.hs, as: m.as, odds: m.odds
+                    }));
+                    await VirtualResult.insertMany(resultsToSave);
+                } catch(e) {}
+
+                // END OF SEASON RESET
+                if (r.matchday === 38) {
+                    vRestartFlag = true;
+                    setTimeout(async () => {
+                        currentVSeason++;
+                        let firstStart = Date.now() + 15000; 
+                        vRounds = [];
+                        for(let i=1; i<=38; i++) vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
+                        vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
+                        await VirtualState.findOneAndUpdate({ stateId: 'MAIN_STATE' }, { currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds });
+                        vRestartFlag = false;
+                    }, 5000);
                 }
-            } catch(e) { console.error("Virtual Settlement Error:", e); }
-
-            // 3. PERSIST MATCHES TO DB (Permanent Record)
-            try {
-                const resultsToSave = r.matches.map(m => ({
-                    season: currentVSeason,
-                    matchday: r.matchday,
-                    home: m.home.name,
-                    away: m.away.name,
-                    hs: m.hs,
-                    as: m.as,
-                    odds: m.odds
-                }));
-                await VirtualResult.insertMany(resultsToSave);
-            } catch(e) {}
-
-            // 4. CHECK END OF SEASON
-            if (r.matchday === 38) {
-                vRestartFlag = true;
-                setTimeout(() => {
-                    currentVSeason++;
-                    startNewVirtualSeason();
-                    vRestartFlag = false;
-                }, 5000);
             }
+            if(oldStatus !== r.status) dbNeedsUpdate = true;
         }
-    }
-}, 1000);
 
-app.get('/api/virtuals/state', (req, res) => {
-    res.json({
-        success: true,
-        serverTime: Date.now(),
-        currentSeason: currentVSeason,
-        rounds: vRounds,
-        standings: vStandings,
-        resultsHistory: vResultsHistory
-    });
+        if (dbNeedsUpdate) {
+            VirtualState.findOneAndUpdate({ stateId: 'MAIN_STATE' }, { currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds }).catch(e=>{});
+        }
+    }, 1000);
+});
+
+app.get('/api/virtuals/state', async (req, res) => {
+    try {
+        const dbResults = await VirtualResult.find({ season: currentVSeason }).sort({ createdAt: -1 }).limit(50);
+        
+        res.json({
+            success: true,
+            serverTime: Date.now(),
+            currentSeason: currentVSeason,
+            rounds: vRounds,
+            standings: vStandings,
+            resultsHistory: dbResults.map(r => ({ md: r.matchday, match: `${r.home} - ${r.away}`, score: `${r.hs} : ${r.as}` }))
+        });
+    } catch(e) { res.status(500).json({ success: false }); }
 });
 
 
@@ -869,7 +904,6 @@ function runAviatorLoop() {
                 aviatorState.history.unshift(aviatorState.crashPoint);
                 if(aviatorState.history.length > 20) aviatorState.history.pop();
                 
-                // Set all open Aviator bets to 'Lost' automatically upon crash
                 Bet.updateMany({ type: 'Aviator', status: 'Open' }, { $set: { status: 'Lost' } }).catch(e=>{});
                 
                 setTimeout(() => {
@@ -902,24 +936,19 @@ app.post('/api/aviator/bet', async (req, res) => {
 
         const betAmt = Number(amount);
 
-        // 🟢 Refund Logic (User cancelled before takeoff)
+        // 🟢 Refund Logic
         if (betAmt < 0) {
             user.balance += Math.abs(betAmt);
             await user.save();
             await Transaction.create({ refId: `CRASH-REF-${Date.now()}`, userPhone, type: 'refund', method: 'Crash Refund', amount: Math.abs(betAmt) });
-            
-            // Delete the bet record so it doesn't show up in history
             await Bet.findOneAndDelete({ userPhone: userPhone, type: 'Aviator', status: 'Open' });
-            
             return res.json({ success: true, newBalance: user.balance });
         }
 
-        // 🟢 Standard Bet Placement utilizing Bonus Balance
         const totalAvailable = user.balance + (user.bonusBalance || 0);
 
         if (totalAvailable >= betAmt) {
             let remainingStake = betAmt;
-            
             if (user.bonusBalance >= remainingStake) {
                 user.bonusBalance -= remainingStake; 
             } else {
@@ -927,26 +956,13 @@ app.post('/api/aviator/bet', async (req, res) => {
                 user.bonusBalance = 0;
                 user.balance -= remainingStake; 
             }
-            
             await user.save();
             
             const tId = `CRASH-BET-${Date.now()}`;
             await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Crash Bet', amount: -betAmt });
-            
-            // Log Aviator to "My Bets"
-            await Bet.create({
-                ticketId: tId,
-                userPhone: user.phone,
-                stake: betAmt,
-                potentialWin: 0,
-                type: 'Aviator',
-                status: 'Open',
-                selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }]
-            });
+            await Bet.create({ ticketId: tId, userPhone: user.phone, stake: betAmt, potentialWin: 0, type: 'Aviator', status: 'Open', selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }] });
 
-            // 🟢 SEND TELEGRAM NOTIFICATION TO ADMIN
             sendTelegramMessage(`✈️ <b>NEW AVIATOR BET</b> ✈️\n\n👤 <b>User:</b> ${userPhone}\n💸 <b>Stake:</b> KES ${betAmt}\n🎫 <b>Ticket:</b> ${tId}`);
-
             res.json({ success: true, newBalance: user.balance });
         } else {
             res.status(400).json({ success: false, message: "Insufficient Funds" });
