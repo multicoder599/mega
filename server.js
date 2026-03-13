@@ -374,7 +374,9 @@ app.get('/api/games', async (req, res) => {
             allGames = [...allGames, ...cachedApiGames];
         }
         res.json({ success: true, games: allGames });
-    } catch (error) { res.status(500).json({ success: false }); }
+    } catch (error) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 
@@ -607,7 +609,9 @@ app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 });
         res.json({ success: true, users });
-    } catch (error) { res.status(500).json({ success: false }); }
+    } catch (error) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 app.put('/api/admin/users/balance', async (req, res) => {
@@ -622,7 +626,9 @@ app.put('/api/admin/users/balance', async (req, res) => {
 
         await Transaction.create({ refId: 'ADMIN-' + Math.floor(Math.random() * 900000), userPhone: phone, type: 'bonus', method: 'Admin Adjustment', amount: user.balance - oldBalance, status: 'Success' });
         res.json({ success: true, message: `Balance updated.` });
-    } catch (error) { res.status(500).json({ success: false }); }
+    } catch (error) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 app.delete('/api/admin/users/:phone', async (req, res) => {
@@ -630,7 +636,9 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
         const user = await User.findOneAndDelete({ phone: req.params.phone });
         if (!user) return res.status(404).json({ success: false });
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ success: false }); }
+    } catch (error) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 app.post('/api/admin/push-alert', async (req, res) => {
@@ -670,7 +678,9 @@ app.delete('/api/games', async (req, res) => {
     try {
         await LiveGame.deleteMany({});
         res.json({ success: true });
-    } catch (error) { res.status(500).json({ success: false }); }
+    } catch (error) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 
@@ -815,6 +825,7 @@ bootVirtualEngine().then(() => {
                                 if(pick === '12' && m.hs !== m.as) isWin = true;
                                 if(pick === 'X2' && m.hs <= m.as) isWin = true;
                             }
+                            
                             b.status = isWin ? 'Won' : 'Lost';
                             await b.save();
 
@@ -864,7 +875,9 @@ app.get('/api/virtuals/state', async (req, res) => {
             rounds: vRounds, standings: vStandings,
             resultsHistory: dbResults.map(r => ({ md: r.matchday, match: `${r.home} - ${r.away}`, score: `${r.hs} : ${r.as}` }))
         });
-    } catch(e) { res.status(500).json({ success: false }); }
+    } catch(e) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 
@@ -936,7 +949,9 @@ app.post('/api/aviator/bet', async (req, res) => {
         } else {
             res.status(400).json({ success: false, message: "Insufficient Funds" });
         }
-    } catch(e) { res.status(500).json({ success: false }); }
+    } catch(e) { 
+        res.status(500).json({ success: false }); 
+    }
 });
 
 
