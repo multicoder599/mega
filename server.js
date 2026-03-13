@@ -406,7 +406,6 @@ app.post('/api/place-bet', async (req, res) => {
         }
         await user.save();
 
-        // 🟢 Add 'legStatus: Open' to every selection to track multi-bets individually
         const processedSelections = selections.map(s => ({
             ...s,
             legStatus: 'Open'
@@ -432,7 +431,6 @@ app.get('/api/bets/:phone', async (req, res) => {
     }
 });
 
-// 🟢 Admin Route to Inject Fixed Results for Real Sports
 app.post('/api/admin/set-result', async (req, res) => {
     try {
         const { matchId, hs, as } = req.body;
@@ -453,10 +451,8 @@ app.post('/api/admin/set-result', async (req, res) => {
     }
 });
 
-// 🟢 ADVANCED 2-Hour Auto-Settlement & Multi-Bet Engine
 async function settleSportsBetsForMatch(matchId, hs, as) {
     try {
-        // Find ALL OPEN bets that contain this specific match
         const openBets = await Bet.find({ 
             status: 'Open', 
             type: { $in: ['Sports', 'Multi', 'Jackpot'] },
@@ -467,7 +463,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
             let betModified = false;
             let betLost = false;
 
-            // 1. Process individual legs
             for (let sel of bet.selections) {
                 if (sel.matchId === matchId && sel.legStatus === 'Open') {
                     let isWin = false;
@@ -503,15 +498,12 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
 
             if (!betModified) continue;
 
-            // 2. Evaluate overall slip status
             if (betLost) {
-                // If ONE match loses, the whole multi/jackpot slip is instantly LOST
                 bet.status = 'Lost';
                 bet.markModified('selections');
                 await bet.save();
                 sendPushNotification(bet.userPhone, "Bet Lost 😔", `Ticket ${bet.ticketId} lost on leg: ${matchId}.`, "bet");
             } else {
-                // Check if ALL legs in the multi-bet have finished and won
                 const allWon = bet.selections.every(s => s.legStatus === 'Won');
                 
                 if (allWon) {
@@ -532,7 +524,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
                         sendPushNotification(user.phone, "Bet Won! 🥳", `Ticket ${bet.ticketId} won KES ${bet.potentialWin}!`, "win");
                     }
                 } else {
-                    // Match won, but other matches on the slip are still pending
                     bet.markModified('selections');
                     await bet.save();
                 }
@@ -543,7 +534,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
-// Background Task: Auto-finish real sports matches 120 mins after kickoff
 setInterval(async () => {
     try {
         const twoHoursAgo = new Date(Date.now() - (120 * 60000));
@@ -564,7 +554,6 @@ setInterval(async () => {
     } catch (e) {}
 }, 60000); 
 
-// CASHOUT LOGIC
 app.post('/api/cashout', async (req, res) => {
     try {
         const { ticketId, userPhone, amount } = req.body;
@@ -801,43 +790,63 @@ bootVirtualEngine().then(() => {
 
                 dbNeedsUpdate = true;
 
-                // SETTLE VIRTUAL BETS
+                // SETTLE VIRTUAL BETS 🟢 FIXED 🟢
                 try {
-                    const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open', 'selections.0.roundId': r.id });
+                    const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open' });
                     for (let b of pendingVBets) {
-                        const matchId = b.selections[0].matchId; 
-                        const m = r.matches.find(mx => mx.id === matchId);
-                        if(m) {
-                            let isWin = false;
-                            const market = b.selections[0].market; const pick = b.selections[0].pick;
-                            if(market === '1X2') {
-                                if(pick === '1' && m.hs > m.as) isWin = true;
-                                if(pick === 'X' && m.hs === m.as) isWin = true;
-                                if(pick === '2' && m.hs < m.as) isWin = true;
-                            } else if (market === 'O/U 2.5') {
-                                if(pick === 'Over' && (m.hs + m.as) > 2.5) isWin = true;
-                                if(pick === 'Under' && (m.hs + m.as) < 2.5) isWin = true;
-                            } else if (market === 'GG/NG') {
-                                const gg = m.hs > 0 && m.as > 0;
-                                if(pick === 'GG' && gg) isWin = true;
-                                if(pick === 'NG' && !gg) isWin = true;
-                            } else if (market === 'Double Chance') {
-                                if(pick === '1X' && m.hs >= m.as) isWin = true;
-                                if(pick === '12' && m.hs !== m.as) isWin = true;
-                                if(pick === 'X2' && m.hs <= m.as) isWin = true;
+                        let betModified = false;
+                        
+                        for (let sel of b.selections) {
+                            if (sel.legStatus === 'Open') {
+                                const m = r.matches.find(mx => mx.id === sel.matchId);
+                                if(m) {
+                                    let isWin = false;
+                                    const market = sel.market; const pick = sel.pick;
+                                    if(market === '1X2') {
+                                        if(pick === '1' && m.hs > m.as) isWin = true;
+                                        if(pick === 'X' && m.hs === m.as) isWin = true;
+                                        if(pick === '2' && m.hs < m.as) isWin = true;
+                                    } else if (market === 'O/U 2.5') {
+                                        if(pick === 'Over' && (m.hs + m.as) > 2.5) isWin = true;
+                                        if(pick === 'Under' && (m.hs + m.as) < 2.5) isWin = true;
+                                    } else if (market === 'GG/NG') {
+                                        const gg = m.hs > 0 && m.as > 0;
+                                        if(pick === 'GG' && gg) isWin = true;
+                                        if(pick === 'NG' && !gg) isWin = true;
+                                    } else if (market === 'Double Chance') {
+                                        if(pick === '1X' && m.hs >= m.as) isWin = true;
+                                        if(pick === '12' && m.hs !== m.as) isWin = true;
+                                        if(pick === 'X2' && m.hs <= m.as) isWin = true;
+                                    }
+                                    
+                                    sel.legStatus = isWin ? 'Won' : 'Lost';
+                                    betModified = true;
+                                }
                             }
-                            
-                            b.status = isWin ? 'Won' : 'Lost';
-                            await b.save();
+                        }
 
-                            if(isWin) {
+                        if (betModified) {
+                            b.markModified('selections');
+                            
+                            const anyLost = b.selections.some(s => s.legStatus === 'Lost');
+                            const allWon = b.selections.every(s => s.legStatus === 'Won');
+                            
+                            if (anyLost) {
+                                b.status = 'Lost';
+                                await b.save();
+                            } else if (allWon) {
+                                b.status = 'Won';
+                                await b.save();
                                 await User.findOneAndUpdate({ phone: b.userPhone }, { $inc: { balance: b.potentialWin } });
                                 await Transaction.create({ refId: `VWIN-${b.ticketId}`, userPhone: b.userPhone, type: 'win', method: 'Virtual Win', amount: b.potentialWin });
-                                sendPushNotification(b.userPhone, "Virtual Bet Won! 🎉", `Your virtual bet won KES ${b.potentialWin}!`, "win");
+                            } else {
+                                await b.save(); // Still open
                             }
                         }
                     }
-                } catch(e) {}
+                } catch(e) {
+                    console.error("Virtual Settlement Engine Error:", e);
+                }
 
                 try {
                     const resultsToSave = r.matches.map(m => ({
@@ -868,7 +877,6 @@ bootVirtualEngine().then(() => {
     }, 1000);
 });
 
-// 🟢 CRITICAL FIX: Wrapped response in "state" object to match frontend expectation
 app.get('/api/virtuals/state', async (req, res) => {
     try {
         const dbResults = await VirtualResult.find({ season: currentVSeason }).sort({ createdAt: -1 }).limit(50);
