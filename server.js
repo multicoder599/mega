@@ -39,7 +39,6 @@ function sendTelegramMessage(message) {
         return;
     }
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    // Fire and forget, no await needed so it doesn't block the main thread
     axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
         .catch(err => console.error("Telegram Notification Error:", err.message));
 }
@@ -68,9 +67,9 @@ const betSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     stake: { type: Number, required: true },
     potentialWin: { type: Number, default: 0 }, 
-    selections: { type: Array, default: [] }, // Array of objects with individual legStatus
-    type: { type: String, default: 'Sports' }, // Sports, Jackpot, Virtuals, Aviator
-    status: { type: String, default: 'Open' }, // Open, Won, Lost, Cashed Out
+    selections: { type: Array, default: [] }, 
+    type: { type: String, default: 'Sports' }, 
+    status: { type: String, default: 'Open' }, 
     createdAt: { type: Date, default: Date.now }
 });
 const Bet = mongoose.model('Bet', betSchema);
@@ -94,7 +93,7 @@ const liveGameSchema = new mongoose.Schema({
     odds: String, 
     draw: String, 
     away_odds: String, 
-    startTime: Date, // Real kickoff time
+    startTime: Date, 
     time: String, 
     date: String,
     hs: { type: Number, default: 0 },
@@ -122,6 +121,14 @@ const virtualStateSchema = new mongoose.Schema({
     rounds: { type: Array, default: [] }
 });
 const VirtualState = mongoose.model('VirtualState', virtualStateSchema);
+
+// 🟢 NEW: SHARED SLIP MODEL 🟢
+const sharedSlipSchema = new mongoose.Schema({
+    code: { type: String, required: true, unique: true },
+    selections: { type: Array, default: [] },
+    createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto-delete after 24 hours
+});
+const SharedSlip = mongoose.model('SharedSlip', sharedSlipSchema);
 
 
 // ==========================================
@@ -184,7 +191,6 @@ app.post('/api/register', async (req, res) => {
         const newUser = new User({ phone, password: hashedPassword, name: name || 'New Player', balance: 0, bonusBalance: 0 });
         await newUser.save();
 
-        // 🟢 TELEGRAM NOTIFICATION: New User
         sendTelegramMessage(`🟢 <b>NEW USER REGISTRATION</b>\n👤 Name: ${newUser.name}\n📱 Phone: ${newUser.phone}`);
 
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, bonusBalance: newUser.bonusBalance, phone: newUser.phone } });
@@ -267,10 +273,8 @@ app.post('/api/megapay/webhook', async (req, res) => {
         user.balance += amount;
         await user.save();
         await Transaction.create({ refId: receipt, userPhone: user.phone, type: "deposit", method: "M-Pesa", amount: amount, status: "Success" });
-        
         sendPushNotification(user.phone, "Deposit Successful", `Your deposit of KES ${amount} has been credited.`, "deposit");
         
-        // 🟢 TELEGRAM NOTIFICATION: Deposit
         sendTelegramMessage(`💵 <b>SUCCESSFUL DEPOSIT</b>\n📱 User: ${user.phone}\n💰 Amount: KES ${amount}\n🧾 Ref: ${receipt}`);
 
     } catch (err) {}
@@ -390,6 +394,39 @@ app.get('/api/games', async (req, res) => {
 
 
 // ==========================================
+// 🟢 NEW: SHARE & LOAD BOOKING CODES
+// ==========================================
+app.post('/api/share-slip', async (req, res) => {
+    try {
+        const { selections } = req.body;
+        if (!selections || selections.length === 0) return res.status(400).json({ success: false });
+
+        // Generate a random 6-character uppercase alphanumeric code
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        
+        await SharedSlip.create({ code, selections });
+        
+        res.json({ success: true, code });
+    } catch (error) {
+        res.status(500).json({ success: false });
+    }
+});
+
+app.get('/api/load-slip/:code', async (req, res) => {
+    try {
+        const { code } = req.params;
+        const slip = await SharedSlip.findOne({ code: code.toUpperCase() });
+        
+        if (!slip) return res.status(404).json({ success: false, message: 'Code not found or expired.' });
+        
+        res.json({ success: true, selections: slip.selections });
+    } catch (error) {
+        res.status(500).json({ success: false });
+    }
+});
+
+
+// ==========================================
 // REAL SPORTS BETTING & SMART MULTI-SETTLEMENT
 // ==========================================
 app.post('/api/place-bet', async (req, res) => {
@@ -415,7 +452,6 @@ app.post('/api/place-bet', async (req, res) => {
         }
         await user.save();
 
-        // 🟢 Add 'legStatus: Open' to every selection to track multi-bets individually
         const processedSelections = selections.map(s => ({
             ...s,
             legStatus: 'Open'
@@ -427,7 +463,6 @@ app.post('/api/place-bet', async (req, res) => {
 
         await Transaction.create({ refId: ticketId, userPhone, type: 'bet', method: `${betType || 'Sports'} Bet`, amount: -stake });
         
-        // 🟢 TELEGRAM NOTIFICATION: Bet Placed
         sendTelegramMessage(`🎟️ <b>NEW BET PLACED</b>\n📱 User: ${userPhone}\n💰 Stake: KES ${stake}\n💸 Pot. Win: KES ${potentialWin}\n📌 Type: ${betType || 'Sports'}\n🎫 Ticket: ${ticketId}`);
 
         res.json({ success: true, newBalance: user.balance, newBonus: user.bonusBalance, ticketId: newBet.ticketId });
@@ -445,12 +480,10 @@ app.get('/api/bets/:phone', async (req, res) => {
     }
 });
 
-// 🟢 FIX 1: Admin Route to Inject Fixed Results for Real Sports (String formatting applied)
 app.post('/api/admin/set-result', async (req, res) => {
     try {
         const { matchId, hs, as } = req.body;
         
-        // Convert matchId to string to prevent Number vs String mismatches in DB
         const game = await LiveGame.findOne({ id: String(matchId) });
         if (!game) return res.status(404).json({ success: false, message: "Match not found in the database. Ensure ID is correct." });
 
@@ -467,7 +500,6 @@ app.post('/api/admin/set-result', async (req, res) => {
     }
 });
 
-// 🟢 ADVANCED 2-Hour Auto-Settlement & Multi-Bet Engine
 async function settleSportsBetsForMatch(matchId, hs, as) {
     try {
         const openBets = await Bet.find({ 
@@ -551,7 +583,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
-// Background Task: Auto-finish real sports matches 120 mins after kickoff
 setInterval(async () => {
     try {
         const twoHoursAgo = new Date(Date.now() - (120 * 60000));
@@ -807,7 +838,6 @@ bootVirtualEngine().then(() => {
 
                 dbNeedsUpdate = true;
 
-                // 🟢 FIX 2: VIRTUAL BETS SETTLEMENT LOOP 🟢
                 try {
                     const pendingVBets = await Bet.find({ type: 'Virtuals', status: 'Open' });
                     for (let b of pendingVBets) {
@@ -856,10 +886,8 @@ bootVirtualEngine().then(() => {
                                 await b.save();
                                 await User.findOneAndUpdate({ phone: b.userPhone }, { $inc: { balance: b.potentialWin } });
                                 await Transaction.create({ refId: `VWIN-${b.ticketId}`, userPhone: b.userPhone, type: 'win', method: 'Virtual Win', amount: b.potentialWin });
-                                // 🟢 TELEGRAM NOTIFICATION: Virtual Win
-                                sendTelegramMessage(`🎊 <b>VIRTUAL WIN!</b>\n📱 User: ${b.userPhone}\n💰 Won: KES ${b.potentialWin}\n🎫 Ticket: ${b.ticketId}`);
                             } else {
-                                await b.save(); // Still open (if multi-bet)
+                                await b.save(); 
                             }
                         }
                     }
