@@ -122,13 +122,34 @@ const virtualStateSchema = new mongoose.Schema({
 });
 const VirtualState = mongoose.model('VirtualState', virtualStateSchema);
 
-// 🟢 NEW: SHARED SLIP MODEL 🟢
 const sharedSlipSchema = new mongoose.Schema({
     code: { type: String, required: true, unique: true },
     selections: { type: Array, default: [] },
-    createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto-delete after 24 hours
+    createdAt: { type: Date, default: Date.now, expires: 86400 }
 });
 const SharedSlip = mongoose.model('SharedSlip', sharedSlipSchema);
+
+
+// ==========================================
+// TIME PARSING UTILITY (FOR ADMIN INJECT)
+// ==========================================
+function parseGameTime(timeStr) {
+    if (!timeStr) return new Date();
+    const now = new Date();
+    let targetDate = new Date(now);
+    
+    // Extract HH:MM from strings like "Today, 15:30" or "Tomorrow, 14:00"
+    const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})/);
+    if (timeMatch) {
+        targetDate.setHours(parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0, 0);
+        
+        if (timeStr.toLowerCase().includes('tomorrow')) {
+            targetDate.setDate(targetDate.getDate() + 1);
+        }
+        return targetDate;
+    }
+    return new Date(); // Fallback
+}
 
 
 // ==========================================
@@ -394,16 +415,14 @@ app.get('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 NEW: SHARE & LOAD BOOKING CODES
+// SHARE & LOAD BOOKING CODES
 // ==========================================
 app.post('/api/share-slip', async (req, res) => {
     try {
         const { selections } = req.body;
         if (!selections || selections.length === 0) return res.status(400).json({ success: false });
 
-        // Generate a random 6-character uppercase alphanumeric code
         const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-        
         await SharedSlip.create({ code, selections });
         
         res.json({ success: true, code });
@@ -465,6 +484,28 @@ app.post('/api/place-bet', async (req, res) => {
         
         sendTelegramMessage(`🎟️ <b>NEW BET PLACED</b>\n📱 User: ${userPhone}\n💰 Stake: KES ${stake}\n💸 Pot. Win: KES ${potentialWin}\n📌 Type: ${betType || 'Sports'}\n🎫 Ticket: ${ticketId}`);
 
+        // 🟢 NEW FIX: Cache API Games into DB so auto-settler can track their exact startTime
+        if (betType === 'Sports' || betType === 'Multi' || betType === 'Jackpot') {
+            for (let s of processedSelections) {
+                try {
+                    const exists = await LiveGame.findOne({ id: String(s.matchId) });
+                    if (!exists) {
+                        const apiGame = cachedApiGames.find(g => String(g.id) === String(s.matchId));
+                        if (apiGame) {
+                            await LiveGame.create({
+                                id: apiGame.id,
+                                category: apiGame.category,
+                                home: apiGame.home,
+                                away: apiGame.away,
+                                startTime: new Date(apiGame.startTime), // Vital for interval tracking
+                                status: 'upcoming'
+                            });
+                        }
+                    }
+                } catch(err) {}
+            }
+        }
+
         res.json({ success: true, newBalance: user.balance, newBonus: user.bonusBalance, ticketId: newBet.ticketId });
     } catch (error) { 
         res.status(500).json({ success: false }); 
@@ -505,7 +546,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
         const openBets = await Bet.find({ 
             status: 'Open', 
             type: { $in: ['Sports', 'Multi', 'Jackpot'] },
-            'selections.matchId': matchId 
+            'selections.matchId': String(matchId) 
         });
         
         for (let bet of openBets) {
@@ -513,7 +554,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
             let betLost = false;
 
             for (let sel of bet.selections) {
-                if (sel.matchId === matchId && sel.legStatus === 'Open') {
+                if (String(sel.matchId) === String(matchId) && sel.legStatus === 'Open') {
                     let isWin = false;
                     
                     if (sel.market === '1X2' || sel.market === 'Match Winner') {
@@ -583,18 +624,21 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
+// 🟢 FIX 2: Precise Auto-Settlement Interval (Exactly 2 hours after real startTime)
 setInterval(async () => {
     try {
-        const twoHoursAgo = new Date(Date.now() - (120 * 60000));
+        const now = Date.now();
+        const twoHoursAgo = new Date(now - (120 * 60000));
         
         const expiredGames = await LiveGame.find({ 
             status: { $ne: 'FINISHED' },
-            startTime: { $lte: twoHoursAgo }
+            startTime: { $lte: twoHoursAgo } // This guarantees 2 hours have passed since the actual match start
         });
 
         for (let game of expiredGames) {
-            game.hs = Math.floor(Math.random() * 4);
-            game.as = Math.floor(Math.random() * 3);
+            // Assign a realistic fallback score if admin didn't intervene
+            if (!game.hs && game.hs !== 0) game.hs = Math.floor(Math.random() * 4);
+            if (!game.as && game.as !== 0) game.as = Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
             await game.save();
 
@@ -697,9 +741,10 @@ app.post('/api/games', async (req, res) => {
         const { games, mode } = req.body;
         if (mode === 'replace') await LiveGame.deleteMany({}); 
         
+        // 🟢 FIX 3: Accurately translate "time: 15:30" string to a real Date object so the 2-hour interval is perfectly synced
         const parsedGames = games.map(g => ({
             ...g,
-            startTime: g.startTime ? new Date(g.startTime) : new Date()
+            startTime: g.startTime ? new Date(g.startTime) : parseGameTime(g.time)
         }));
 
         await LiveGame.insertMany(parsedGames); 
@@ -720,7 +765,7 @@ app.delete('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED) 🟢
+// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE
 // ==========================================
 const V_TEAMS = [
     { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
@@ -1006,9 +1051,6 @@ app.post('/api/aviator/bet', async (req, res) => {
             const tId = `CRASH-BET-${Date.now()}`;
             await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Crash Bet', amount: -betAmt });
             await Bet.create({ ticketId: tId, userPhone: user.phone, stake: betAmt, potentialWin: 0, type: 'Aviator', status: 'Open', selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }] });
-
-            // 🟢 TELEGRAM NOTIFICATION: Aviator Bet
-            sendTelegramMessage(`🛩️ <b>NEW AVIATOR BET</b>\n📱 User: ${user.phone}\n💰 Stake: KES ${betAmt}\n🎫 Ticket: ${tId}`);
 
             res.json({ success: true, newBalance: user.balance });
         } else {
