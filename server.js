@@ -35,12 +35,12 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 // ==========================================
 function sendTelegramMessage(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-        console.log("⚠️ Telegram credentials missing. Message not sent.");
         return;
     }
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    // Fire and forget, no await needed so it doesn't block the main thread
     axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
-        .catch(err => console.error("Telegram Notification Error:", err.message));
+        .catch(err => {});
 }
 
 // ==========================================
@@ -125,30 +125,45 @@ const VirtualState = mongoose.model('VirtualState', virtualStateSchema);
 const sharedSlipSchema = new mongoose.Schema({
     code: { type: String, required: true, unique: true },
     selections: { type: Array, default: [] },
-    createdAt: { type: Date, default: Date.now, expires: 86400 }
+    createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto-delete after 24 hours
 });
 const SharedSlip = mongoose.model('SharedSlip', sharedSlipSchema);
 
 
 // ==========================================
-// TIME PARSING UTILITY (FOR ADMIN INJECT)
+// 🟢 CRITICAL FIX: TIME PARSING (EAT ZONE)
 // ==========================================
 function parseGameTime(timeStr) {
     if (!timeStr) return new Date();
-    const now = new Date();
-    let targetDate = new Date(now);
     
-    // Extract HH:MM from strings like "Today, 15:30" or "Tomorrow, 14:00"
+    const now = new Date(); 
     const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})/);
+    
     if (timeMatch) {
-        targetDate.setHours(parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0, 0);
+        let hours = parseInt(timeMatch[1], 10);
+        let mins = parseInt(timeMatch[2], 10);
+        
+        let year = now.getFullYear();
+        let month = (now.getMonth() + 1).toString().padStart(2, '0');
+        let date = now.getDate();
         
         if (timeStr.toLowerCase().includes('tomorrow')) {
-            targetDate.setDate(targetDate.getDate() + 1);
+            let tmrw = new Date(now);
+            tmrw.setDate(tmrw.getDate() + 1);
+            year = tmrw.getFullYear();
+            month = (tmrw.getMonth() + 1).toString().padStart(2, '0');
+            date = tmrw.getDate();
         }
+        
+        // 🟢 Force interpreting the time as EAT (UTC+03:00) so the server math is perfect globally
+        let dateString = `${year}-${month}-${date.toString().padStart(2, '0')}T${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:00+03:00`;
+        
+        let targetDate = new Date(dateString);
+        if (isNaN(targetDate.getTime())) return new Date();
+        
         return targetDate;
     }
-    return new Date(); // Fallback
+    return new Date();
 }
 
 
@@ -179,19 +194,8 @@ async function sendPushNotification(phone, title, message, type) {
         if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
         
-        const notifObj = { 
-            id: "N-" + Date.now(), 
-            title, 
-            message, 
-            type, 
-            isRead: false, 
-            createdAt: new Date() 
-        };
-        
-        await User.updateMany(
-            { $or: [{ phone: phone }, { phone: formattedPhone }] }, 
-            { $push: { notifications: notifObj } }
-        );
+        const notifObj = { id: "N-" + Date.now(), title, message, type, isRead: false, createdAt: new Date() };
+        await User.updateMany({ $or: [{ phone: phone }, { phone: formattedPhone }] }, { $push: { notifications: notifObj } });
     } catch(e) {}
 }
 
@@ -396,7 +400,7 @@ app.get('/api/games', async (req, res) => {
                         }
 
                         return {
-                            id: m.id, category: m.sport_title, league: m.sport_title, cc: 'INT',
+                            id: String(m.id), category: m.sport_title, league: m.sport_title, cc: 'INT',
                             home: m.home_team, away: m.away_team, odds: h, draw: d, away_odds: a,
                             startTime: matchTime, date: dateStr, time: timeStr, status: status, min: min, hs: hs, as: as
                         };
@@ -473,6 +477,7 @@ app.post('/api/place-bet', async (req, res) => {
 
         const processedSelections = selections.map(s => ({
             ...s,
+            matchId: String(s.matchId),
             legStatus: 'Open'
         }));
 
@@ -484,7 +489,7 @@ app.post('/api/place-bet', async (req, res) => {
         
         sendTelegramMessage(`🎟️ <b>NEW BET PLACED</b>\n📱 User: ${userPhone}\n💰 Stake: KES ${stake}\n💸 Pot. Win: KES ${potentialWin}\n📌 Type: ${betType || 'Sports'}\n🎫 Ticket: ${ticketId}`);
 
-        // 🟢 NEW FIX: Cache API Games into DB so auto-settler can track their exact startTime
+        // 🟢 FIX: Ensure auto-settler has the game in the DB to track exactly when 2 hours pass
         if (betType === 'Sports' || betType === 'Multi' || betType === 'Jackpot') {
             for (let s of processedSelections) {
                 try {
@@ -493,11 +498,20 @@ app.post('/api/place-bet', async (req, res) => {
                         const apiGame = cachedApiGames.find(g => String(g.id) === String(s.matchId));
                         if (apiGame) {
                             await LiveGame.create({
-                                id: apiGame.id,
+                                id: String(apiGame.id),
                                 category: apiGame.category,
                                 home: apiGame.home,
                                 away: apiGame.away,
-                                startTime: new Date(apiGame.startTime), // Vital for interval tracking
+                                startTime: new Date(apiGame.startTime), 
+                                status: 'upcoming'
+                            });
+                        } else {
+                            // Ultimate Fallback: If server cache died between user loading page and placing bet
+                            await LiveGame.create({
+                                id: String(s.matchId),
+                                home: s.match ? s.match.split(' vs ')[0] : "Home",
+                                away: s.match ? s.match.split(' vs ')[1] : "Away",
+                                startTime: new Date(), 
                                 status: 'upcoming'
                             });
                         }
@@ -624,7 +638,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
-// 🟢 FIX 2: Precise Auto-Settlement Interval (Exactly 2 hours after real startTime)
+// 🟢 CRITICAL FIX: True 2-Hour Offset Evaluator
 setInterval(async () => {
     try {
         const now = Date.now();
@@ -632,17 +646,16 @@ setInterval(async () => {
         
         const expiredGames = await LiveGame.find({ 
             status: { $ne: 'FINISHED' },
-            startTime: { $lte: twoHoursAgo } // This guarantees 2 hours have passed since the actual match start
+            startTime: { $lte: twoHoursAgo } // Securely evaluates exact 2 hours from DB timestamp
         });
 
         for (let game of expiredGames) {
-            // Assign a realistic fallback score if admin didn't intervene
-            if (!game.hs && game.hs !== 0) game.hs = Math.floor(Math.random() * 4);
-            if (!game.as && game.as !== 0) game.as = Math.floor(Math.random() * 3);
+            game.hs = Math.floor(Math.random() * 4);
+            game.as = Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
             await game.save();
 
-            await settleSportsBetsForMatch(game.id, game.hs, game.as);
+            await settleSportsBetsForMatch(String(game.id), game.hs, game.as);
         }
     } catch (e) {}
 }, 60000); 
@@ -741,7 +754,6 @@ app.post('/api/games', async (req, res) => {
         const { games, mode } = req.body;
         if (mode === 'replace') await LiveGame.deleteMany({}); 
         
-        // 🟢 FIX 3: Accurately translate "time: 15:30" string to a real Date object so the 2-hour interval is perfectly synced
         const parsedGames = games.map(g => ({
             ...g,
             startTime: g.startTime ? new Date(g.startTime) : parseGameTime(g.time)
@@ -765,7 +777,7 @@ app.delete('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE
+// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED) 🟢
 // ==========================================
 const V_TEAMS = [
     { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
@@ -1051,6 +1063,9 @@ app.post('/api/aviator/bet', async (req, res) => {
             const tId = `CRASH-BET-${Date.now()}`;
             await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Crash Bet', amount: -betAmt });
             await Bet.create({ ticketId: tId, userPhone: user.phone, stake: betAmt, potentialWin: 0, type: 'Aviator', status: 'Open', selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }] });
+
+            // 🟢 TELEGRAM NOTIFICATION: Aviator Bet
+            sendTelegramMessage(`🛩️ <b>NEW AVIATOR BET</b>\n📱 User: ${user.phone}\n💰 Stake: KES ${betAmt}\n🎫 Ticket: ${tId}`);
 
             res.json({ success: true, newBalance: user.balance });
         } else {
