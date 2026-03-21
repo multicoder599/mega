@@ -35,12 +35,13 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 // ==========================================
 function sendTelegramMessage(message) {
     if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+        console.log("⚠️ Telegram credentials missing. Message not sent.");
         return;
     }
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
     // Fire and forget, no await needed so it doesn't block the main thread
     axios.post(url, { chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
-        .catch(err => {});
+        .catch(err => console.error("Telegram Notification Error:", err.message));
 }
 
 // ==========================================
@@ -131,7 +132,7 @@ const SharedSlip = mongoose.model('SharedSlip', sharedSlipSchema);
 
 
 // ==========================================
-// 🟢 CRITICAL FIX: TIME PARSING (EAT ZONE)
+// TIME PARSING UTILITY (FOR ADMIN INJECT)
 // ==========================================
 function parseGameTime(timeStr) {
     if (!timeStr) return new Date();
@@ -155,7 +156,7 @@ function parseGameTime(timeStr) {
             date = tmrw.getDate();
         }
         
-        // 🟢 Force interpreting the time as EAT (UTC+03:00) so the server math is perfect globally
+        // Force interpreting the time as EAT (UTC+03:00) so the server math is perfect globally
         let dateString = `${year}-${month}-${date.toString().padStart(2, '0')}T${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:00+03:00`;
         
         let targetDate = new Date(dateString);
@@ -194,8 +195,19 @@ async function sendPushNotification(phone, title, message, type) {
         if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
         
-        const notifObj = { id: "N-" + Date.now(), title, message, type, isRead: false, createdAt: new Date() };
-        await User.updateMany({ $or: [{ phone: phone }, { phone: formattedPhone }] }, { $push: { notifications: notifObj } });
+        const notifObj = { 
+            id: "N-" + Date.now(), 
+            title, 
+            message, 
+            type, 
+            isRead: false, 
+            createdAt: new Date() 
+        };
+        
+        await User.updateMany(
+            { $or: [{ phone: phone }, { phone: formattedPhone }] }, 
+            { $push: { notifications: notifObj } }
+        );
     } catch(e) {}
 }
 
@@ -489,7 +501,6 @@ app.post('/api/place-bet', async (req, res) => {
         
         sendTelegramMessage(`🎟️ <b>NEW BET PLACED</b>\n📱 User: ${userPhone}\n💰 Stake: KES ${stake}\n💸 Pot. Win: KES ${potentialWin}\n📌 Type: ${betType || 'Sports'}\n🎫 Ticket: ${ticketId}`);
 
-        // 🟢 FIX: Ensure auto-settler has the game in the DB to track exactly when 2 hours pass
         if (betType === 'Sports' || betType === 'Multi' || betType === 'Jackpot') {
             for (let s of processedSelections) {
                 try {
@@ -506,7 +517,6 @@ app.post('/api/place-bet', async (req, res) => {
                                 status: 'upcoming'
                             });
                         } else {
-                            // Ultimate Fallback: If server cache died between user loading page and placing bet
                             await LiveGame.create({
                                 id: String(s.matchId),
                                 home: s.match ? s.match.split(' vs ')[0] : "Home",
@@ -638,7 +648,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
-// 🟢 CRITICAL FIX: True 2-Hour Offset Evaluator
+// 🟢 2-HOUR AUTO-SETTLEMENT ENGINE (REAL SPORTS) 🟢
 setInterval(async () => {
     try {
         const now = Date.now();
@@ -646,12 +656,14 @@ setInterval(async () => {
         
         const expiredGames = await LiveGame.find({ 
             status: { $ne: 'FINISHED' },
-            startTime: { $lte: twoHoursAgo } // Securely evaluates exact 2 hours from DB timestamp
+            startTime: { $lte: twoHoursAgo }
         });
 
         for (let game of expiredGames) {
-            game.hs = Math.floor(Math.random() * 4);
-            game.as = Math.floor(Math.random() * 3);
+            console.log(`[AUTO-SETTLE] Match ${game.id} has reached 2 hours post-kickoff. Settling with random realistic score.`);
+            
+            if (!game.hs && game.hs !== 0) game.hs = Math.floor(Math.random() * 4);
+            if (!game.as && game.as !== 0) game.as = Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
             await game.save();
 
@@ -777,7 +789,7 @@ app.delete('/api/games', async (req, res) => {
 
 
 // ==========================================
-// 🟢 SERVER-SIDE VIRTUAL LEAGUE ENGINE (DB BACKED) 🟢
+// VIRTUAL LEAGUE ENGINE (DB BACKED)
 // ==========================================
 const V_TEAMS = [
     { name: "Manchester Blue", color: "#6CABDD", short: "MCI" }, { name: "Manchester Reds", color: "#DA291C", short: "MUN" },
@@ -1001,7 +1013,7 @@ app.get('/api/virtuals/state', async (req, res) => {
 
 
 // ==========================================
-// 🟢 CRASH GAME ENGINE & REFUND LOGIC
+// CRASH GAME ENGINE & REFUND LOGIC
 // ==========================================
 let aviatorState = {
     status: 'WAITING', startTime: 0, crashPoint: 1.00, history: [1.24, 3.87, 11.20, 1.01, 6.42]
@@ -1064,7 +1076,6 @@ app.post('/api/aviator/bet', async (req, res) => {
             await Transaction.create({ refId: tId, userPhone, type: 'bet', method: 'Crash Bet', amount: -betAmt });
             await Bet.create({ ticketId: tId, userPhone: user.phone, stake: betAmt, potentialWin: 0, type: 'Aviator', status: 'Open', selections: [{ match: "Crash Round", market: "Crash", pick: "Auto", odds: 1.0 }] });
 
-            // 🟢 TELEGRAM NOTIFICATION: Aviator Bet
             sendTelegramMessage(`🛩️ <b>NEW AVIATOR BET</b>\n📱 User: ${user.phone}\n💰 Stake: KES ${betAmt}\n🎫 Ticket: ${tId}`);
 
             res.json({ success: true, newBalance: user.balance });
@@ -1075,7 +1086,6 @@ app.post('/api/aviator/bet', async (req, res) => {
         res.status(500).json({ success: false }); 
     }
 });
-
 
 // ==========================================
 // START SERVER
