@@ -648,6 +648,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
+// 🟢 2-HOUR AUTO-SETTLEMENT ENGINE 
 setInterval(async () => {
     try {
         const now = Date.now();
@@ -1010,7 +1011,7 @@ app.get('/api/virtuals/state', async (req, res) => {
 
 
 // ==========================================
-// 🟢 CRASH GAME ENGINE & ALERT SYSTEM
+// CRASH GAME ENGINE & ALERT SYSTEM
 // ==========================================
 let aviatorState = {
     status: 'WAITING', startTime: 0, crashPoint: 1.00, history: [1.24, 3.87, 11.20, 1.01, 6.42]
@@ -1019,10 +1020,10 @@ let aviatorState = {
 function runAviatorLoop() {
     if (aviatorState.status === 'WAITING') {
         
-        // 🟢 PRE-GENERATE CRASH POINT BEFORE ROUND STARTS
+        // PRE-GENERATE CRASH POINT BEFORE ROUND STARTS
         aviatorState.crashPoint = Math.random() < 0.4 ? (1.00 + Math.random() * 0.5) : (1.5 + Math.random() * 10);
         
-        // 🟢 SEND TELEGRAM SIGNAL IMMEDIATELY
+        // SEND TELEGRAM SIGNAL IMMEDIATELY
         sendTelegramMessage(`⚠️ <b>AVIATOR SIGNAL</b> ⚠️\n🚀 Next Round Crash Point: <b>${aviatorState.crashPoint.toFixed(2)}x</b>\n⏳ Round starting in 5 seconds...`);
 
         setTimeout(() => {
