@@ -648,7 +648,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     }
 }
 
-// 🟢 2-HOUR AUTO-SETTLEMENT ENGINE (REAL SPORTS) 🟢
 setInterval(async () => {
     try {
         const now = Date.now();
@@ -656,12 +655,10 @@ setInterval(async () => {
         
         const expiredGames = await LiveGame.find({ 
             status: { $ne: 'FINISHED' },
-            startTime: { $lte: twoHoursAgo }
+            startTime: { $lte: twoHoursAgo } 
         });
 
         for (let game of expiredGames) {
-            console.log(`[AUTO-SETTLE] Match ${game.id} has reached 2 hours post-kickoff. Settling with random realistic score.`);
-            
             if (!game.hs && game.hs !== 0) game.hs = Math.floor(Math.random() * 4);
             if (!game.as && game.as !== 0) game.as = Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
@@ -1013,7 +1010,7 @@ app.get('/api/virtuals/state', async (req, res) => {
 
 
 // ==========================================
-// CRASH GAME ENGINE & REFUND LOGIC
+// 🟢 CRASH GAME ENGINE & ALERT SYSTEM
 // ==========================================
 let aviatorState = {
     status: 'WAITING', startTime: 0, crashPoint: 1.00, history: [1.24, 3.87, 11.20, 1.01, 6.42]
@@ -1021,10 +1018,16 @@ let aviatorState = {
 
 function runAviatorLoop() {
     if (aviatorState.status === 'WAITING') {
+        
+        // 🟢 PRE-GENERATE CRASH POINT BEFORE ROUND STARTS
+        aviatorState.crashPoint = Math.random() < 0.4 ? (1.00 + Math.random() * 0.5) : (1.5 + Math.random() * 10);
+        
+        // 🟢 SEND TELEGRAM SIGNAL IMMEDIATELY
+        sendTelegramMessage(`⚠️ <b>AVIATOR SIGNAL</b> ⚠️\n🚀 Next Round Crash Point: <b>${aviatorState.crashPoint.toFixed(2)}x</b>\n⏳ Round starting in 5 seconds...`);
+
         setTimeout(() => {
             aviatorState.status = 'FLYING';
             aviatorState.startTime = Date.now();
-            aviatorState.crashPoint = Math.random() < 0.4 ? (1.00 + Math.random() * 0.5) : (1.5 + Math.random() * 10);
             const flightDuration = (Math.log(aviatorState.crashPoint) / 0.06) * 1000;
             
             setTimeout(() => {
@@ -1038,13 +1041,20 @@ function runAviatorLoop() {
                     runAviatorLoop(); 
                 }, 4000);
             }, flightDuration);
-        }, 5000);
+        }, 5000); // Wait the standard 5 seconds before taking off
     }
 }
 runAviatorLoop();
 
 app.get('/api/aviator/state', (req, res) => {
-    res.json({ success: true, status: aviatorState.status, startTime: aviatorState.startTime, crashPoint: aviatorState.status === 'CRASHED' ? aviatorState.crashPoint : null, history: aviatorState.history });
+    // DO NOT expose the crashPoint to the client unless it has actually crashed!
+    res.json({ 
+        success: true, 
+        status: aviatorState.status, 
+        startTime: aviatorState.startTime, 
+        crashPoint: aviatorState.status === 'CRASHED' ? aviatorState.crashPoint : null, 
+        history: aviatorState.history 
+    });
 });
 
 app.post('/api/aviator/bet', async (req, res) => {
@@ -1086,6 +1096,7 @@ app.post('/api/aviator/bet', async (req, res) => {
         res.status(500).json({ success: false }); 
     }
 });
+
 
 // ==========================================
 // START SERVER
