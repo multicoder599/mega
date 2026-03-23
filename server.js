@@ -130,9 +130,21 @@ const sharedSlipSchema = new mongoose.Schema({
 });
 const SharedSlip = mongoose.model('SharedSlip', sharedSlipSchema);
 
+// 🟢 ADMIN SCHEMAS (Fixed Outcomes & Config)
+const fixedGameSchema = new mongoose.Schema({
+    matchName: String, result_1x2: String, result_ou25: String, result_ggng: String, ft_score: String
+});
+const FixedGame = mongoose.model('FixedGame', fixedGameSchema);
+
+const configSchema = new mongoose.Schema({
+    aviatorWinChance: { type: Number, default: 30 },
+    virtualsMargin: { type: Number, default: 1.20 }
+});
+const Config = mongoose.model('Config', configSchema);
+
 
 // ==========================================
-// TIME PARSING UTILITY (FOR ADMIN INJECT)
+// TIME PARSING UTILITY (EAT ZONE)
 // ==========================================
 function parseGameTime(timeStr) {
     if (!timeStr) return new Date();
@@ -156,7 +168,7 @@ function parseGameTime(timeStr) {
             date = tmrw.getDate();
         }
         
-        // Force interpreting the time as EAT (UTC+03:00) so the server math is perfect globally
+        // Force EAT (UTC+03:00) so server math is perfect globally
         let dateString = `${year}-${month}-${date.toString().padStart(2, '0')}T${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:00+03:00`;
         
         let targetDate = new Date(dateString);
@@ -347,7 +359,7 @@ app.get('/api/balance/:phone', async (req, res) => {
 
 
 // ==========================================
-// UNIFIED GAMES FETCH (WITH DATE/TIME LOGIC)
+// UNIFIED GAMES FETCH 
 // ==========================================
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
@@ -399,7 +411,7 @@ app.get('/api/games', async (req, res) => {
                         let timeStr = matchTime.toLocaleTimeString('en-GB', {hour: '2-digit', minute:'2-digit', timeZone: 'Africa/Nairobi'});
                         let dateStr = matchTime.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', timeZone: 'Africa/Nairobi' });
 
-                        if (diffMins > 130) return null; // Game ended naturally
+                        if (diffMins > 130) return null; 
 
                         let status = "upcoming", min = null, hs = 0, as = 0;
                         if (diffMins >= 0 && diffMins <= 120) {
@@ -428,7 +440,6 @@ app.get('/api/games', async (req, res) => {
         res.status(500).json({ success: false }); 
     }
 });
-
 
 // ==========================================
 // SHARE & LOAD BOOKING CODES
@@ -462,7 +473,7 @@ app.get('/api/load-slip/:code', async (req, res) => {
 
 
 // ==========================================
-// REAL SPORTS BETTING & SMART MULTI-SETTLEMENT
+// 🟢 SMART SPORTS BETTING & SETTLEMENT ENGINE 🟢
 // ==========================================
 app.post('/api/place-bet', async (req, res) => {
     try {
@@ -545,35 +556,16 @@ app.get('/api/bets/:phone', async (req, res) => {
     }
 });
 
-app.post('/api/admin/set-result', async (req, res) => {
-    try {
-        const { matchId, hs, as } = req.body;
-        
-        const game = await LiveGame.findOne({ id: String(matchId) });
-        if (!game) return res.status(404).json({ success: false, message: "Match not found in the database. Ensure ID is correct." });
 
-        game.hs = Number(hs);
-        game.as = Number(as);
-        game.status = 'FINISHED';
-        await game.save();
-
-        await settleSportsBetsForMatch(String(matchId), game.hs, game.as);
-
-        res.json({ success: true, message: `Match ${matchId} updated to ${hs}-${as} and bets evaluated.` });
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
+// 🟢 SMART SETTLEMENT FUNCTION (Handles ugly string formats) 🟢
 async function settleSportsBetsForMatch(matchId, hs, as) {
     try {
-        const openBets = await Bet.find({ 
-            status: 'Open', 
-            type: { $in: ['Sports', 'Multi', 'Jackpot'] },
-            'selections.matchId': String(matchId) 
-        });
+        console.log(`\n[SETTLE] 🔔 Triggered for Match ID: ${matchId} | Score: ${hs}-${as}`);
         
-        for (let bet of openBets) {
+        const openBets = await Bet.find({ status: 'Open', type: { $in: ['Sports', 'Multi', 'Jackpot'] } });
+        let matchedBets = openBets.filter(b => b.selections.some(s => String(s.matchId) === String(matchId)));
+        
+        for (let bet of matchedBets) {
             let betModified = false;
             let betLost = false;
 
@@ -581,26 +573,41 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
                 if (String(sel.matchId) === String(matchId) && sel.legStatus === 'Open') {
                     let isWin = false;
                     
-                    if (sel.market === '1X2' || sel.market === 'Match Winner') {
-                        if (sel.pick === '1' && hs > as) isWin = true;
-                        if (sel.pick === 'X' && hs === as) isWin = true;
-                        if (sel.pick === '2' && hs < as) isWin = true;
-                    } else if (sel.market === 'GG/NG' || sel.market === 'Both Teams To Score (Gg/ng)') {
-                        if (sel.pick.includes('GG') || sel.pick === 'Yes') {
+                    // 🟢 SMART PARSER: Deduce the intended market 
+                    let rawPck = String(sel.pick || '');
+                    let pck = rawPck.includes('-') ? rawPck.split('-')[1].trim().toUpperCase() : rawPck.trim().toUpperCase();
+                    let mkt = sel.market;
+                    
+                    if (!mkt || mkt === '-') {
+                        if (['1', 'X', '2', 'HOME', 'DRAW', 'AWAY'].includes(pck)) mkt = '1X2';
+                        else if (['1X', '12', 'X2', '1/X', '1/2', 'X/2'].includes(pck)) mkt = 'Double Chance';
+                        else if (['GG', 'NG', 'YES', 'NO'].includes(pck)) mkt = 'GG/NG';
+                        else if (pck.includes('VER') || pck.includes('NDER')) mkt = 'O/U';
+                        else mkt = 'Match Winner'; // Fallback
+                    }
+                    
+                    if (mkt === '1X2' || mkt === 'Match Winner') {
+                        if (['1', 'HOME'].includes(pck) || rawPck.endsWith('1')) { if (hs > as) isWin = true; }
+                        else if (['X', 'DRAW'].includes(pck) || rawPck.endsWith('X')) { if (hs === as) isWin = true; }
+                        else if (['2', 'AWAY'].includes(pck) || rawPck.endsWith('2')) { if (hs < as) isWin = true; }
+                    } else if (mkt === 'GG/NG' || mkt.includes('Both Teams')) {
+                        if (pck.includes('GG') || pck === 'YES') {
                             if (hs > 0 && as > 0) isWin = true;
                         } else {
                             if (hs === 0 || as === 0) isWin = true;
                         }
-                    } else if (sel.market.includes('Total Goals') || sel.market.includes('O/U')) {
+                    } else if (mkt.includes('Total Goals') || mkt.includes('O/U')) {
                         const total = hs + as;
-                        if (sel.pick.includes('Over 2.5') && total > 2.5) isWin = true;
-                        if (sel.pick.includes('Under 2.5') && total < 2.5) isWin = true;
-                        if (sel.pick.includes('Over 1.5') && total > 1.5) isWin = true;
-                        if (sel.pick.includes('Under 1.5') && total < 1.5) isWin = true;
-                    } else if (sel.market === 'Double Chance') {
-                        if (sel.pick === '1/X' || sel.pick === '1X') { if (hs >= as) isWin = true; }
-                        if (sel.pick === '1/2' || sel.pick === '12') { if (hs !== as) isWin = true; }
-                        if (sel.pick === 'X/2' || sel.pick === 'X2') { if (hs <= as) isWin = true; }
+                        if (pck.includes('2.5') && pck.includes('OVER') && total > 2.5) isWin = true;
+                        if (pck.includes('2.5') && pck.includes('UNDER') && total < 2.5) isWin = true;
+                        if (pck.includes('1.5') && pck.includes('OVER') && total > 1.5) isWin = true;
+                        if (pck.includes('1.5') && pck.includes('UNDER') && total < 1.5) isWin = true;
+                        if (pck.includes('3.5') && pck.includes('OVER') && total > 3.5) isWin = true;
+                        if (pck.includes('3.5') && pck.includes('UNDER') && total < 3.5) isWin = true;
+                    } else if (mkt === 'Double Chance') {
+                        if (['1X', '1/X'].includes(pck)) { if (hs >= as) isWin = true; }
+                        if (['12', '1/2'].includes(pck)) { if (hs !== as) isWin = true; }
+                        if (['X2', 'X/2'].includes(pck)) { if (hs <= as) isWin = true; }
                     }
 
                     sel.legStatus = isWin ? 'Won' : 'Lost';
@@ -619,7 +626,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
                 sendPushNotification(bet.userPhone, "Bet Lost 😔", `Ticket ${bet.ticketId} lost on leg: ${matchId}.`, "bet");
             } else {
                 const allWon = bet.selections.every(s => s.legStatus === 'Won');
-                
                 if (allWon) {
                     bet.status = 'Won';
                     bet.markModified('selections');
@@ -630,11 +636,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
                         user.balance += bet.potentialWin;
                         await user.save();
                         
-                        await Transaction.create({ 
-                            refId: `WIN-${bet.ticketId}`, userPhone: user.phone, 
-                            type: 'win', method: `${bet.type} Win`, amount: bet.potentialWin 
-                        });
-                        
+                        await Transaction.create({ refId: `WIN-${bet.ticketId}`, userPhone: user.phone, type: 'win', method: `${bet.type} Win`, amount: bet.potentialWin });
                         sendPushNotification(user.phone, "Bet Won! 🥳", `Ticket ${bet.ticketId} won KES ${bet.potentialWin}!`, "win");
                     }
                 } else {
@@ -643,25 +645,49 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
                 }
             }
         }
-    } catch (e) { 
-        console.error("Settlement error", e); 
-    }
+    } catch (e) { console.error("Settlement error", e); }
 }
 
-// 🟢 2-HOUR AUTO-SETTLEMENT ENGINE 
+// 🟢 ADMIN MANUAL SETTLEMENT 
+app.post('/api/admin/set-result', async (req, res) => {
+    try {
+        const { matchId, hs, as } = req.body;
+        const game = await LiveGame.findOne({ id: String(matchId) });
+        if (game) {
+            game.hs = Number(hs);
+            game.as = Number(as);
+            game.status = 'FINISHED';
+            await game.save();
+        }
+        await settleSportsBetsForMatch(String(matchId), Number(hs), Number(as));
+        res.json({ success: true, message: `Match ${matchId} updated to ${hs}-${as} and bets evaluated.` });
+    } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// 🟢 2-HOUR REAL SPORTS AUTO-SETTLER WITH CHEAT CODES
 setInterval(async () => {
     try {
         const now = Date.now();
         const twoHoursAgo = new Date(now - (120 * 60000));
         
-        const expiredGames = await LiveGame.find({ 
-            status: { $ne: 'FINISHED' },
-            startTime: { $lte: twoHoursAgo } 
-        });
+        const expiredGames = await LiveGame.find({ status: { $ne: 'FINISHED' }, startTime: { $lte: twoHoursAgo } });
 
         for (let game of expiredGames) {
-            if (!game.hs && game.hs !== 0) game.hs = Math.floor(Math.random() * 4);
-            if (!game.as && game.as !== 0) game.as = Math.floor(Math.random() * 3);
+            let forcedHs = null; let forcedAs = null;
+            
+            // Check if admin injected a cheat code for this specific match
+            const fixedMatch = await FixedGame.findOne({ matchName: new RegExp(game.home, 'i') });
+            if (fixedMatch) {
+                if (fixedMatch.ft_score && fixedMatch.ft_score.includes('-')) {
+                    forcedHs = parseInt(fixedMatch.ft_score.split('-')[0]);
+                    forcedAs = parseInt(fixedMatch.ft_score.split('-')[1]);
+                } else if (fixedMatch.result_1x2 === '1') { forcedHs = 2; forcedAs = 0; }
+                else if (fixedMatch.result_1x2 === '2') { forcedHs = 0; forcedAs = 2; }
+                else if (fixedMatch.result_1x2 === 'X') { forcedHs = 1; forcedAs = 1; }
+            }
+            
+            game.hs = forcedHs !== null ? forcedHs : Math.floor(Math.random() * 4);
+            game.as = forcedAs !== null ? forcedAs : Math.floor(Math.random() * 3);
             game.status = 'FINISHED';
             await game.save();
 
@@ -682,7 +708,6 @@ app.post('/api/cashout', async (req, res) => {
             await user.save();
             await Bet.updateOne({ ticketId: ticketId }, { $set: { status: 'Cashed Out' } });
             await Transaction.create({ refId: ticketId + '-WIN', userPhone, type: 'win', method: 'Crash Win', amount: amount });
-            
             return res.json({ success: true, newBalance: user.balance });
         }
 
@@ -699,22 +724,18 @@ app.post('/api/cashout', async (req, res) => {
 
         await Transaction.create({ refId: `CO-${ticketId}`, userPhone, type: 'cashout', method: 'Cashout', amount: amount });
         res.json({ success: true, newBalance: user.balance });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 
 // ==========================================
-// ADMIN ROUTES & PUSH ALERTS
+// ADMIN ROUTES (USERS, CONFIG, FIXED GAMES)
 // ==========================================
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 });
         res.json({ success: true, users });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 app.put('/api/admin/users/balance', async (req, res) => {
@@ -729,9 +750,7 @@ app.put('/api/admin/users/balance', async (req, res) => {
 
         await Transaction.create({ refId: 'ADMIN-' + Math.floor(Math.random() * 900000), userPhone: phone, type: 'bonus', method: 'Admin Adjustment', amount: user.balance - oldBalance, status: 'Success' });
         res.json({ success: true, message: `Balance updated.` });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 app.delete('/api/admin/users/:phone', async (req, res) => {
@@ -739,9 +758,7 @@ app.delete('/api/admin/users/:phone', async (req, res) => {
         const user = await User.findOneAndDelete({ phone: req.params.phone });
         if (!user) return res.status(404).json({ success: false });
         res.json({ success: true });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 app.post('/api/admin/push-alert', async (req, res) => {
@@ -754,35 +771,69 @@ app.post('/api/admin/push-alert', async (req, res) => {
             await sendPushNotification(phone, title, message, 'admin_alert');
         }
         res.json({success: true, message: "Alert successfully dispatched!"});
-    } catch(e) { 
-        res.status(500).json({success: false }); 
-    }
+    } catch(e) { res.status(500).json({success: false }); }
 });
 
+// Admin Inject Real Games
 app.post('/api/games', async (req, res) => {
     try {
         const { games, mode } = req.body;
         if (mode === 'replace') await LiveGame.deleteMany({}); 
-        
-        const parsedGames = games.map(g => ({
-            ...g,
-            startTime: g.startTime ? new Date(g.startTime) : parseGameTime(g.time)
-        }));
-
+        const parsedGames = games.map(g => ({ ...g, startTime: g.startTime ? new Date(g.startTime) : parseGameTime(g.time) }));
         await LiveGame.insertMany(parsedGames); 
         res.json({ success: true, message: "Games updated in database" });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 app.delete('/api/games', async (req, res) => {
     try {
         await LiveGame.deleteMany({});
         res.json({ success: true });
-    } catch (error) { 
-        res.status(500).json({ success: false }); 
-    }
+    } catch (error) { res.status(500).json({ success: false }); }
+});
+
+// Admin Cheat Codes / Fixed Games
+app.get('/api/admin/fixed-games', async (req, res) => {
+    try {
+        const games = await FixedGame.find({});
+        res.json({ success: true, games });
+    } catch(e) { res.status(500).json({success: false}); }
+});
+
+app.post('/api/admin/fixed-games', async (req, res) => {
+    try {
+        const { games } = req.body;
+        await FixedGame.insertMany(games);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({success: false}); }
+});
+
+app.delete('/api/admin/fixed-games', async (req, res) => {
+    try {
+        await FixedGame.deleteMany({});
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({success: false}); }
+});
+
+// Admin Global Configurations
+app.get('/api/admin/config', async (req, res) => {
+    try {
+        let config = await Config.findOne({});
+        if(!config) { config = await Config.create({ aviatorWinChance: 30, virtualsMargin: 1.20 }); }
+        res.json({ success: true, config });
+    } catch (error) { res.status(500).json({ success: false }); }
+});
+
+app.post('/api/admin/config', async (req, res) => {
+    try {
+        const { aviatorWinChance, virtualsMargin } = req.body;
+        let config = await Config.findOne({});
+        if(!config) config = new Config({});
+        config.aviatorWinChance = aviatorWinChance;
+        config.virtualsMargin = virtualsMargin;
+        await config.save();
+        res.json({ success: true });
+    } catch (error) { res.status(500).json({ success: false }); }
 });
 
 
@@ -1011,7 +1062,7 @@ app.get('/api/virtuals/state', async (req, res) => {
 
 
 // ==========================================
-// CRASH GAME ENGINE & ALERT SYSTEM
+// CRASH GAME ENGINE
 // ==========================================
 let aviatorState = {
     status: 'WAITING', startTime: 0, crashPoint: 1.00, history: [1.24, 3.87, 11.20, 1.01, 6.42]
@@ -1020,10 +1071,7 @@ let aviatorState = {
 function runAviatorLoop() {
     if (aviatorState.status === 'WAITING') {
         
-        // PRE-GENERATE CRASH POINT BEFORE ROUND STARTS
         aviatorState.crashPoint = Math.random() < 0.4 ? (1.00 + Math.random() * 0.5) : (1.5 + Math.random() * 10);
-        
-        // SEND TELEGRAM SIGNAL IMMEDIATELY
         sendTelegramMessage(`⚠️ <b>AVIATOR SIGNAL</b> ⚠️\n🚀 Next Round Crash Point: <b>${aviatorState.crashPoint.toFixed(2)}x</b>\n⏳ Round starting in 5 seconds...`);
 
         setTimeout(() => {
@@ -1042,13 +1090,12 @@ function runAviatorLoop() {
                     runAviatorLoop(); 
                 }, 4000);
             }, flightDuration);
-        }, 5000); // Wait the standard 5 seconds before taking off
+        }, 5000); 
     }
 }
 runAviatorLoop();
 
 app.get('/api/aviator/state', (req, res) => {
-    // DO NOT expose the crashPoint to the client unless it has actually crashed!
     res.json({ 
         success: true, 
         status: aviatorState.status, 
@@ -1066,7 +1113,6 @@ app.post('/api/aviator/bet', async (req, res) => {
 
         const betAmt = Number(amount);
 
-        // Refund Logic
         if (betAmt < 0) {
             user.balance += Math.abs(betAmt);
             await user.save();
