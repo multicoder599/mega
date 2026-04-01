@@ -45,19 +45,12 @@ function sendTelegramMessage(message) {
 }
 
 // ==========================================
-// MONGODB CONNECTION
+// MONGODB CONNECTION & MODELS
 // ==========================================
 mongoose.connect(MONGO_URI)
-  .then((conn) => {
-    console.log(`✅ Connected to MongoDB: ${conn.connection.name}`);
-    
-    // START YOUR SERVER & LOOPS ONLY HERE
-    startVirtualEngine(); // If you have a function that runs virtualstates.findOne()
-  })
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err);
-    process.exit(1); // Stop the server if DB fails, so Render restarts it
-  });
+  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
+
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
