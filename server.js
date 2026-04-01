@@ -45,15 +45,19 @@ function sendTelegramMessage(message) {
 }
 
 // ==========================================
-// MONGODB CONNECTION & MODELS
+// MONGODB CONNECTION
 // ==========================================
-if (!MONGO_URI) {
-    console.error("❌ ERROR: MONGO_URI is undefined. Check Render Environment Variables.");
-} else {
-    mongoose.connect(MONGO_URI)
-      .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
-      .catch(err => console.error('❌ MongoDB connection error:', err));
-}
+mongoose.connect(MONGO_URI)
+  .then((conn) => {
+    console.log(`✅ Connected to MongoDB: ${conn.connection.name}`);
+    
+    // START YOUR SERVER & LOOPS ONLY HERE
+    startVirtualEngine(); // If you have a function that runs virtualstates.findOne()
+  })
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err);
+    process.exit(1); // Stop the server if DB fails, so Render restarts it
+  });
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
@@ -895,9 +899,15 @@ function createVirtualRound(matchday, startTime) {
     return { id: 'R' + matchday, matchday: matchday, startTime: startTime, status: 'BETTING', liveMin: "0'", currentMinNum: 0, matches: matches };
 }
 
-async function bootVirtualEngine() {
-    let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
-    
+// ✅ GOOD: Only call this inside the .then() of your mongoose.connect
+async function startVirtualEngine() {
+    try {
+      const state = await VirtualState.findOne();
+      console.log("Virtual Engine Started");
+    } catch (e) {
+      console.error("Engine failed to start", e);
+    }
+ }
     if (!state || state.rounds.length === 0) {
         currentVSeason = 1;
         vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
