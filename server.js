@@ -50,32 +50,14 @@ const mongooseOptions = {
     family: 4                       // Force IPv4 to avoid Render/Atlas DNS lag
 };
 
-
-// 1. Disable buffering so you get immediate errors instead of 10s hangs
-mongoose.set('bufferCommands', false);
-
-// 2. Connect to the DB
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log("✅ Database Connected - Megaodds is ready");
-    
-    // 3. ONLY START your logic/queries after this confirmation
-    initializeSystem(); 
-  })
+mongoose.connect(process.env.MONGO_URI, mongooseOptions)
+  .then(() => console.log('✅ Connected to MongoDB successfully!'))
   .catch(err => {
-    console.error("❌ DB Connection Failed:", err.message);
-    // Exit so Render can attempt a fresh restart
+    console.error('❌ MongoDB connection error:', err.message);
+    // On Render, we want the app to restart if the DB is down at boot
     process.exit(1); 
   });
 
-async function initializeSystem() {
-  try {
-    const config = await systemconfigs.findOne();
-    console.log("🚀 System Config Loaded");
-  } catch (err) {
-    console.error("Initialization Error:", err.message);
-  }
-}
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
@@ -881,6 +863,7 @@ const V_TEAMS = [
 let vRounds = [];
 let vStandings = [];
 let currentVSeason = 1;
+let vRestartFlag = false;
 
 function generateVMatchEvents(homeProb) {
     let events = [];
@@ -917,29 +900,13 @@ function createVirtualRound(matchday, startTime) {
     return { id: 'R' + matchday, matchday: matchday, startTime: startTime, status: 'BETTING', liveMin: "0'", currentMinNum: 0, matches: matches };
 }
 
-async function bootVirtualEngine() {
-    let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
+// ==========================================
+// START VIRTUAL ENGINE AFTER DB CONNECTS
+// ==========================================
+
+function startVirtualEngine() {
+    console.log("🎮 Starting Virtual League Engine...");
     
-    if (!state || state.rounds.length === 0) {
-        currentVSeason = 1;
-        vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
-        
-        let firstStart = Date.now() + 15000; 
-        for(let i=1; i<=38; i++) {
-            vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
-        }
-        
-        await VirtualState.create({ currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds });
-    } else {
-        currentVSeason = state.currentSeason;
-        vStandings = state.standingsData;
-        vRounds = state.rounds;
-    }
-}
-
-bootVirtualEngine().then(() => {
-    let vRestartFlag = false;
-
     setInterval(async () => {
         let now = Date.now();
         if (vRestartFlag || vRounds.length === 0) return;
@@ -1065,6 +1032,35 @@ bootVirtualEngine().then(() => {
             VirtualState.findOneAndUpdate({ stateId: 'MAIN_STATE' }, { currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds }).catch(e=>{});
         }
     }, 1000);
+}
+
+// Initialize engine only after MongoDB connects
+mongoose.connection.once('open', async () => {
+    try {
+        let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
+        
+        if (!state || !state.rounds || state.rounds.length === 0) {
+            currentVSeason = 1;
+            vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
+            
+            let firstStart = Date.now() + 15000; 
+            for(let i=1; i<=38; i++) {
+                vRounds.push(createVirtualRound(i, firstStart + ((i-1) * 120000))); 
+            }
+            
+            await VirtualState.create({ stateId: 'MAIN_STATE', currentSeason: currentVSeason, standingsData: vStandings, rounds: vRounds });
+            console.log('✅ Virtual League Engine initialized with new season');
+        } else {
+            currentVSeason = state.currentSeason;
+            vStandings = state.standingsData;
+            vRounds = state.rounds;
+            console.log('✅ Virtual League Engine restored from database');
+        }
+        
+        startVirtualEngine();
+    } catch (err) {
+        console.error('❌ Virtual Engine initialization error:', err);
+    }
 });
 
 app.get('/api/virtuals/state', async (req, res) => {
