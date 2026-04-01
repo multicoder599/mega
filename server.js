@@ -47,10 +47,12 @@ function sendTelegramMessage(message) {
 // ==========================================
 // MONGODB CONNECTION & MODELS
 // ==========================================
-mongoose.connect(MONGO_URI)
-  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
-
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log("✅ Successfully connected to MongoDB Cluster"))
+  .catch(err => {
+    console.error("❌ CLUSTER CONNECTION ERROR:", err.message);
+    // This stops the buffering timeout by explaining the real problem
+  });
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
