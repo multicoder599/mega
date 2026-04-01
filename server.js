@@ -50,14 +50,32 @@ const mongooseOptions = {
     family: 4                       // Force IPv4 to avoid Render/Atlas DNS lag
 };
 
-mongoose.connect(process.env.MONGO_URI, mongooseOptions)
-  .then(() => console.log('✅ Connected to MongoDB successfully!'))
+
+// 1. Disable buffering so you get immediate errors instead of 10s hangs
+mongoose.set('bufferCommands', false);
+
+// 2. Connect to the DB
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log("✅ Database Connected - ApexBet is ready");
+    
+    // 3. ONLY START your logic/queries after this confirmation
+    initializeSystem(); 
+  })
   .catch(err => {
-    console.error('❌ MongoDB connection error:', err.message);
-    // On Render, we want the app to restart if the DB is down at boot
+    console.error("❌ DB Connection Failed:", err.message);
+    // Exit so Render can attempt a fresh restart
     process.exit(1); 
   });
 
+async function initializeSystem() {
+  try {
+    const config = await systemconfigs.findOne();
+    console.log("🚀 System Config Loaded");
+  } catch (err) {
+    console.error("Initialization Error:", err.message);
+  }
+}
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
