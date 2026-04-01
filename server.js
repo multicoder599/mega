@@ -899,9 +899,15 @@ function createVirtualRound(matchday, startTime) {
     return { id: 'R' + matchday, matchday: matchday, startTime: startTime, status: 'BETTING', liveMin: "0'", currentMinNum: 0, matches: matches };
 }
 
-async function bootVirtualEngine() {
-    let state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
-    
+// ✅ GOOD: Only call this inside the .then() of your mongoose.connect
+async function startVirtualEngine() {
+    try {
+      const state = await VirtualState.findOne({ stateId: 'MAIN_STATE' });
+      console.log("Virtual Engine Started");
+    } catch (e) {
+      console.error("Engine failed to start", e);
+    }
+ }
     if (!state || state.rounds.length === 0) {
         currentVSeason = 1;
         vStandings = V_TEAMS.map(t => ({ name: t.name, color: t.color, short: t.short, p: 0, pts: 0, gd: 0 })).sort((a,b) => a.name.localeCompare(b.name));
