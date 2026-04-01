@@ -57,7 +57,7 @@ mongoose.set('bufferCommands', false);
 // 2. Connect to the DB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
-    console.log("✅ Database Connected - ApexBet is ready");
+    console.log("✅ Database Connected - Megaodds is ready");
     
     // 3. ONLY START your logic/queries after this confirmation
     initializeSystem(); 
