@@ -27,7 +27,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ==========================================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGO_URI = process.env.MONGO_URI;
 const ODDS_API_KEY = process.env.ODDS_API_KEY; 
 
 // ==========================================
@@ -47,12 +47,10 @@ function sendTelegramMessage(message) {
 // ==========================================
 // MONGODB CONNECTION & MODELS
 // ==========================================
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log("✅ Successfully connected to MongoDB Cluster"))
-  .catch(err => {
-    console.error("❌ CLUSTER CONNECTION ERROR:", err.message);
-    // This stops the buffering timeout by explaining the real problem
-  });
+mongoose.connect(MONGO_URI)
+  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
+
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
