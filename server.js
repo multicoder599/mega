@@ -44,12 +44,19 @@ function sendTelegramMessage(message) {
         .catch(err => console.error("Telegram Notification Error:", err.message));
 }
 
-// ==========================================
-// MONGODB CONNECTION & MODELS
-// ==========================================
-mongoose.connect(MONGO_URI)
-  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+const mongooseOptions = {
+    serverSelectionTimeoutMS: 10000, // Wait 10s for a node to become primary
+    socketTimeoutMS: 45000,         // Close sockets after 45s of inactivity
+    family: 4                       // Force IPv4 to avoid Render/Atlas DNS lag
+};
+
+mongoose.connect(process.env.MONGO_URI, mongooseOptions)
+  .then(() => console.log('✅ Connected to MongoDB successfully!'))
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err.message);
+    // On Render, we want the app to restart if the DB is down at boot
+    process.exit(1); 
+  });
 
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
