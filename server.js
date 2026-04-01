@@ -47,10 +47,13 @@ function sendTelegramMessage(message) {
 // ==========================================
 // MONGODB CONNECTION & MODELS
 // ==========================================
-mongoose.connect(MONGO_URI)
-  .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
-
+if (!MONGO_URI) {
+    console.error("❌ ERROR: MONGO_URI is undefined. Check Render Environment Variables.");
+} else {
+    mongoose.connect(MONGO_URI)
+      .then((conn) => console.log(`✅ Connected to MongoDB successfully! Database: ${conn.connection.name}`))
+      .catch(err => console.error('❌ MongoDB connection error:', err));
+}
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true }, 
