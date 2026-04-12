@@ -549,7 +549,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     } catch (e) { console.error("Settlement error", e); }
 }
 
-// 🟢 ADMIN: SETTLE A SINGLE SPECIFIC MATCH INSTANTLY 🟢
+// 🟢 ADMIN MANUAL SETTLEMENT 
 app.post('/api/admin/set-result', async (req, res) => {
     try {
         const { matchId, hs, as } = req.body;
@@ -570,16 +570,22 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
     try {
         const fixedGames = await FixedGame.find({});
         if (fixedGames.length === 0) {
-            return res.status(400).json({ success: false, message: "No active cheat codes. Set a fixed result first." });
+            return res.status(400).json({ success: false, message: "No active cheat codes found. Please set a fixed result first." });
         }
 
         let settledCount = 0;
         for (let fg of fixedGames) {
+            // Smart search: Grab the first team name from the input
             let searchName = fg.matchName;
             if (searchName.includes('vs')) searchName = searchName.split('vs')[0].trim();
+            else if (searchName.includes('-')) searchName = searchName.split('-')[0].trim();
             
+            // Find any active game where this team is playing (Home OR Away)
             const gamesToSettle = await LiveGame.find({ 
-                home: new RegExp(searchName, 'i'),
+                $or: [
+                    { home: new RegExp(searchName, 'i') },
+                    { away: new RegExp(searchName, 'i') }
+                ],
                 status: { $ne: 'FINISHED' } 
             });
 
@@ -593,11 +599,13 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
                 else if (fg.result_1x2 === '2') { forcedHs = 0; forcedAs = 2; }
                 else if (fg.result_1x2 === 'X') { forcedHs = 1; forcedAs = 1; }
 
+                // Save final score to database
                 game.hs = forcedHs;
                 game.as = forcedAs;
                 game.status = 'FINISHED';
                 await game.save();
 
+                // Settle the bets for this match
                 await settleSportsBetsForMatch(String(game.id), game.hs, game.as);
                 settledCount++;
             }
