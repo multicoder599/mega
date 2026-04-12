@@ -509,7 +509,6 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
 
                     sel.legStatus = isWin ? 'Won' : 'Lost';
                     
-                    // 🟢 Inject final score into the selection name so the UI can display it
                     if (!sel.match.includes("⚽")) {
                         sel.match = `${sel.match} ⚽ (${hs}-${as})`;
                     }
@@ -575,14 +574,22 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
 
         let settledCount = 0;
         for (let fg of fixedGames) {
-            // Smart search: Grab the first team name from the input
-            let searchName = fg.matchName;
-            if (searchName.includes('vs')) searchName = searchName.split('vs')[0].trim();
-            else if (searchName.includes('-')) searchName = searchName.split('-')[0].trim();
             
-            // Find any active game where this team is playing (Home OR Away)
+            // Extract a clean search string (in case the input is "TeamA vs TeamB" or "TeamA - TeamB")
+            let originalInput = fg.matchName.trim();
+            let searchName = originalInput;
+            
+            // Only split if there are spaces around the separator to avoid breaking IDs like "FOOT-F505"
+            if (searchName.toLowerCase().includes(' vs ')) {
+                searchName = searchName.split(/ vs /i)[0].trim();
+            } else if (searchName.includes(' - ')) {
+                searchName = searchName.split(' - ')[0].trim();
+            }
+            
+            // 🟢 SMART SEARCH: Check by EXACT ID, or Regex Home/Away Team
             const gamesToSettle = await LiveGame.find({ 
                 $or: [
+                    { id: originalInput },
                     { home: new RegExp(searchName, 'i') },
                     { away: new RegExp(searchName, 'i') }
                 ],
@@ -629,7 +636,15 @@ setInterval(async () => {
         for (let game of expiredGames) {
             let forcedHs = null; let forcedAs = null;
             
-            const fixedMatch = await FixedGame.findOne({ matchName: new RegExp(game.home, 'i') });
+            // 🟢 SMART SEARCH: Allow cheat code to match by ID, Home Team, or Away Team
+            const fixedMatch = await FixedGame.findOne({ 
+                $or: [
+                    { matchName: game.id },
+                    { matchName: new RegExp(game.home, 'i') },
+                    { matchName: new RegExp(game.away, 'i') }
+                ]
+            });
+            
             if (fixedMatch) {
                 if (fixedMatch.ft_score && fixedMatch.ft_score.includes('-')) {
                     forcedHs = parseInt(fixedMatch.ft_score.split('-')[0]);
