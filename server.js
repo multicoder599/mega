@@ -396,7 +396,6 @@ app.get('/api/load-slip/:code', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
-
 // ==========================================
 // 🟢 SMART SPORTS BETTING & SETTLEMENT ENGINE 🟢
 // ==========================================
@@ -509,6 +508,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
 
                     sel.legStatus = isWin ? 'Won' : 'Lost';
                     
+                    // 🟢 Inject final score into the selection name so the UI can display it
                     if (!sel.match.includes("⚽")) {
                         sel.match = `${sel.match} ⚽ (${hs}-${as})`;
                     }
@@ -574,22 +574,15 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
 
         let settledCount = 0;
         for (let fg of fixedGames) {
+            // Smart search: Grab the first team name from the input
+            let searchName = fg.matchName;
+            if (searchName.includes('vs')) searchName = searchName.split('vs')[0].trim();
+            else if (searchName.includes('-')) searchName = searchName.split('-')[0].trim();
             
-            // Extract a clean search string (in case the input is "TeamA vs TeamB" or "TeamA - TeamB")
-            let originalInput = fg.matchName.trim();
-            let searchName = originalInput;
-            
-            // Only split if there are spaces around the separator to avoid breaking IDs like "FOOT-F505"
-            if (searchName.toLowerCase().includes(' vs ')) {
-                searchName = searchName.split(/ vs /i)[0].trim();
-            } else if (searchName.includes(' - ')) {
-                searchName = searchName.split(' - ')[0].trim();
-            }
-            
-            // 🟢 SMART SEARCH: Check by EXACT ID, or Regex Home/Away Team
+            // Find any active game where this team is playing (Home OR Away)
             const gamesToSettle = await LiveGame.find({ 
                 $or: [
-                    { id: originalInput },
+                    { id: fg.matchName },
                     { home: new RegExp(searchName, 'i') },
                     { away: new RegExp(searchName, 'i') }
                 ],
@@ -612,8 +605,9 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
                 game.status = 'FINISHED';
                 await game.save();
 
-                // Settle the bets for this match
-                await settleSportsBetsForMatch(String(game.id), game.hs, game.as);
+                // 🟢 FIX: Extract the physical string ID
+                const physicalMatchId = game._doc.id || game.id;
+                await settleSportsBetsForMatch(String(physicalMatchId), game.hs, game.as);
                 settledCount++;
             }
         }
@@ -636,7 +630,6 @@ setInterval(async () => {
         for (let game of expiredGames) {
             let forcedHs = null; let forcedAs = null;
             
-            // 🟢 SMART SEARCH: Allow cheat code to match by ID, Home Team, or Away Team
             const fixedMatch = await FixedGame.findOne({ 
                 $or: [
                     { matchName: game.id },
@@ -659,7 +652,9 @@ setInterval(async () => {
             game.status = 'FINISHED';
             await game.save();
 
-            await settleSportsBetsForMatch(String(game.id), game.hs, game.as);
+            // 🟢 FIX: Extract the physical string ID
+            const physicalMatchId = game._doc.id || game.id;
+            await settleSportsBetsForMatch(String(physicalMatchId), game.hs, game.as);
         }
     } catch (e) {}
 }, 60000); 
