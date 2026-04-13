@@ -138,7 +138,7 @@ const Config = mongoose.model('Config', configSchema);
 
 
 // ==========================================
-// TIME PARSING UTILITY
+// TIME PARSING UTILITY (EAT ZONE)
 // ==========================================
 function parseGameTime(timeStr) {
     if (!timeStr) return new Date();
@@ -400,8 +400,9 @@ app.get('/api/load-slip/:code', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
+
 // ==========================================
-// 🟢 SMART SPORTS BETTING & SETTLEMENT ENGINE
+// 🟢 SMART SPORTS BETTING & SETTLEMENT ENGINE 🟢
 // ==========================================
 app.post('/api/place-bet', async (req, res) => {
     try {
@@ -433,7 +434,8 @@ app.post('/api/place-bet', async (req, res) => {
         await Transaction.create({ refId: ticketId, userPhone, type: 'bet', method: `${betType || 'Sports'} Bet`, amount: -stake });
         sendTelegramMessage(`🎟️ <b>NEW BET PLACED</b>\n📱 User: ${userPhone}\n💰 Stake: KES ${stake}\n💸 Pot. Win: KES ${potentialWin}\n📌 Type: ${betType || 'Sports'}\n🎫 Ticket: ${ticketId}`);
 
-        if (betType === 'Sports' || betType === 'Multi' || betType === 'Jackpot') {
+        // 🟢 FIX: Include 'Single' so that Single bets actually get registered in LiveGame
+        if (['Sports', 'Multi', 'Jackpot', 'Single'].includes(betType)) {
             for (let s of processedSelections) {
                 try {
                     const exists = await LiveGame.findOne({ id: String(s.matchId) });
@@ -463,51 +465,65 @@ app.get('/api/bets/:phone', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
-// 🟢 SMART SETTLEMENT FUNCTION (Type Safe for Draws) 🟢
+// 🟢 SMART SETTLEMENT FUNCTION (Type Safe & Failsafe Matching) 🟢
 async function settleSportsBetsForMatch(matchId, hs, as) {
     try {
         let hScore = Number(hs);
         let aScore = Number(as);
         console.log(`\n[SETTLE] 🔔 Triggered for Match ID: ${matchId} | Score: ${hScore}-${aScore}`);
         
-        const openBets = await Bet.find({ status: 'Open', type: { $in: ['Sports', 'Multi', 'Jackpot'] } });
-        let matchedBets = openBets.filter(b => b.selections.some(s => String(s.matchId) === String(matchId)));
+        const gameDoc = await LiveGame.findOne({ id: String(matchId) });
+        const gHome = gameDoc ? escapeRegex(gameDoc.home.toLowerCase().trim()) : null;
+
+        // 🟢 FIX: Remove the 'type' filter so ALL open bets (including 'Single') are fetched
+        const openBets = await Bet.find({ status: 'Open' });
         
-        for (let bet of matchedBets) {
+        for (let bet of openBets) {
             let betModified = false;
             let betLost = false;
 
             for (let sel of bet.selections) {
-                if (String(sel.matchId) === String(matchId) && sel.legStatus === 'Open') {
+                if (sel.legStatus !== 'Open') continue;
+
+                let isTargetLeg = (String(sel.matchId) === String(matchId));
+                let legMatchStr = sel.match ? sel.match.split('⚽')[0].toLowerCase() : "";
+                
+                // Backup check in case frontend sent a bad ID but the team name matches
+                if (!isTargetLeg && gHome && legMatchStr.includes(gHome)) {
+                    isTargetLeg = true;
+                }
+
+                if (isTargetLeg) {
                     let isWin = false;
                     let rawPck = String(sel.pick || '');
                     let pck = rawPck.includes('-') ? rawPck.split('-')[1].trim().toUpperCase() : rawPck.trim().toUpperCase();
-                    let mkt = sel.market;
+                    let mkt = (sel.market || '').toUpperCase();
                     
-                    if (!mkt || mkt === '-') {
-                        if (['1', 'X', '2', 'HOME', 'DRAW', 'AWAY'].includes(pck)) mkt = '1X2';
-                        else if (['1X', '12', 'X2', '1/X', '1/2', 'X/2'].includes(pck)) mkt = 'Double Chance';
-                        else if (['GG', 'NG', 'YES', 'NO'].includes(pck)) mkt = 'GG/NG';
-                        else if (pck.includes('VER') || pck.includes('NDER')) mkt = 'O/U';
-                        else mkt = 'Match Winner'; 
+                    if (['1', 'X', '2', 'HOME', 'DRAW', 'AWAY'].includes(mkt)) { pck = mkt; mkt = '1X2'; }
+                    if (['OVER', 'UNDER'].includes(mkt) || mkt.includes('2.5')) { pck = mkt; mkt = 'O/U'; }
+                    if (['GG', 'NG'].includes(mkt)) { pck = mkt; mkt = 'GG/NG'; }
+
+                    if (!mkt || mkt === '-' || mkt === 'MATCH RESULT' || mkt === 'FOOTBALL' || mkt === '1X2') {
+                        mkt = '1X2'; 
                     }
                     
-                    if (mkt === '1X2' || mkt === 'Match Winner') {
+                    // 🟢 FIX: 'Match Winner' uppercased is 'MATCH WINNER', not 'Match Winner'
+                    if (mkt === '1X2' || mkt === 'MATCH WINNER') {
                         if (['1', 'HOME'].includes(pck) || rawPck.endsWith('1')) { if (hScore > aScore) isWin = true; }
                         else if (['X', 'DRAW'].includes(pck) || rawPck.endsWith('X')) { if (hScore === aScore) isWin = true; }
                         else if (['2', 'AWAY'].includes(pck) || rawPck.endsWith('2')) { if (hScore < aScore) isWin = true; }
-                    } else if (mkt === 'GG/NG' || mkt.includes('Both Teams')) {
+                    } else if (mkt === 'GG/NG' || mkt.includes('BOTH TEAMS')) {
                         if (pck.includes('GG') || pck === 'YES') { if (hScore > 0 && aScore > 0) isWin = true; } 
                         else { if (hScore === 0 || aScore === 0) isWin = true; }
-                    } else if (mkt.includes('Total Goals') || mkt.includes('O/U')) {
+                    } else if (mkt.includes('TOTAL') || mkt.includes('O/U')) {
                         const total = hScore + aScore;
-                        if (pck.includes('2.5') && pck.includes('OVER') && total > 2.5) isWin = true;
-                        if (pck.includes('2.5') && pck.includes('UNDER') && total < 2.5) isWin = true;
-                        if (pck.includes('1.5') && pck.includes('OVER') && total > 1.5) isWin = true;
-                        if (pck.includes('1.5') && pck.includes('UNDER') && total < 1.5) isWin = true;
-                        if (pck.includes('3.5') && pck.includes('OVER') && total > 3.5) isWin = true;
-                        if (pck.includes('3.5') && pck.includes('UNDER') && total < 3.5) isWin = true;
-                    } else if (mkt === 'Double Chance') {
+                        if ((pck.includes('OVER') || rawPck.toUpperCase().includes('OVER')) && total > 2.5) isWin = true;
+                        if ((pck.includes('UNDER') || rawPck.toUpperCase().includes('UNDER')) && total < 2.5) isWin = true;
+                        if ((pck.includes('OVER') || rawPck.toUpperCase().includes('OVER')) && total > 1.5) isWin = true;
+                        if ((pck.includes('UNDER') || rawPck.toUpperCase().includes('UNDER')) && total < 1.5) isWin = true;
+                        if ((pck.includes('OVER') || rawPck.toUpperCase().includes('OVER')) && total > 3.5) isWin = true;
+                        if ((pck.includes('UNDER') || rawPck.toUpperCase().includes('UNDER')) && total < 3.5) isWin = true;
+                    } else if (mkt.includes('DOUBLE CHANCE')) {
                         if (['1X', '1/X'].includes(pck)) { if (hScore >= aScore) isWin = true; }
                         if (['12', '1/2'].includes(pck)) { if (hScore !== aScore) isWin = true; }
                         if (['X2', 'X/2'].includes(pck)) { if (hScore <= aScore) isWin = true; }
@@ -554,6 +570,7 @@ async function settleSportsBetsForMatch(matchId, hs, as) {
     } catch (e) { console.error("Settlement error", e); }
 }
 
+// 🟢 ADMIN MANUAL SETTLEMENT 
 app.post('/api/admin/set-result', async (req, res) => {
     try {
         const { matchId, hs, as } = req.body;
@@ -569,7 +586,7 @@ app.post('/api/admin/set-result', async (req, res) => {
     } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// 🟢 FORCE SETTLE ALL FIXED GAMES INSTANTLY (Regex Safe) 🟢
+// 🟢 ADMIN: FORCE SETTLE ALL ACTIVE CHEAT CODES INSTANTLY 🟢
 app.post('/api/admin/force-settle-fixed', async (req, res) => {
     try {
         const fixedGames = await FixedGame.find({});
@@ -579,27 +596,32 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
 
         let settledCount = 0;
         for (let fg of fixedGames) {
-            let searchName = fg.matchName.trim();
-            if (searchName.includes('vs')) searchName = searchName.split(/vs/i)[0].trim();
-            else if (searchName.includes('-')) searchName = searchName.split('-')[0].trim();
-            
-            const safeSearch = escapeRegex(searchName);
-            
-            const gamesToSettle = await LiveGame.find({ 
-                $or: [
-                    { id: fg.matchName },
-                    { home: new RegExp(safeSearch, 'i') },
-                    { away: new RegExp(safeSearch, 'i') }
-                ],
-                status: { $ne: 'FINISHED' } 
-            });
+            // First check for exact ID Match
+            let exactMatch = await LiveGame.find({ id: fg.matchName.trim(), status: { $ne: 'FINISHED' } });
+            let gamesToSettle = exactMatch;
+
+            // If no exact match, fallback to Home/Away Regex Search
+            if (gamesToSettle.length === 0) {
+                let searchName = fg.matchName.trim();
+                if (searchName.toLowerCase().includes(' vs ')) searchName = searchName.split(/vs/i)[0].trim();
+                
+                const safeSearch = escapeRegex(searchName);
+                
+                gamesToSettle = await LiveGame.find({ 
+                    $or: [
+                        { home: new RegExp('^' + safeSearch, 'i') },
+                        { away: new RegExp('^' + safeSearch, 'i') }
+                    ],
+                    status: { $ne: 'FINISHED' } 
+                });
+            }
 
             for (let game of gamesToSettle) {
                 let forcedHs = 0; let forcedAs = 0;
 
                 if (fg.ft_score && fg.ft_score.includes('-')) {
-                    forcedHs = parseInt(fg.ft_score.split('-')[0]);
-                    forcedAs = parseInt(fg.ft_score.split('-')[1]);
+                    forcedHs = parseInt(fg.ft_score.split('-')[0]) || 0;
+                    forcedAs = parseInt(fg.ft_score.split('-')[1]) || 0;
                 } else if (fg.result_1x2 === '1') { forcedHs = 2; forcedAs = 0; }
                 else if (fg.result_1x2 === '2') { forcedHs = 0; forcedAs = 2; }
                 else if (fg.result_1x2 === 'X') { forcedHs = 1; forcedAs = 1; }
@@ -621,7 +643,8 @@ app.post('/api/admin/force-settle-fixed', async (req, res) => {
     }
 });
 
-// 🟢 2-HOUR AUTO-SETTLER WITH CHEAT CODES (Regex Safe) 🟢
+
+// 🟢 2-HOUR REAL SPORTS AUTO-SETTLER WITH CHEAT CODES 🟢
 setInterval(async () => {
     try {
         const now = Date.now();
@@ -632,22 +655,21 @@ setInterval(async () => {
         for (let game of expiredGames) {
             try {
                 let forcedHs = null; let forcedAs = null;
+                const safeHome = escapeRegex(game.home || "IMPOSSIBLE_MATCH_STRING");
+                const safeAway = escapeRegex(game.away || "IMPOSSIBLE_MATCH_STRING");
                 
-                const safeHome = escapeRegex(game.home || "");
-                const safeAway = escapeRegex(game.away || "");
-
                 const fixedMatch = await FixedGame.findOne({ 
                     $or: [
                         { matchName: game.id },
-                        { matchName: new RegExp(safeHome, 'i') },
-                        { matchName: new RegExp(safeAway, 'i') }
+                        { matchName: new RegExp('^' + safeHome, 'i') },
+                        { matchName: new RegExp('^' + safeAway, 'i') }
                     ]
                 });
                 
                 if (fixedMatch) {
                     if (fixedMatch.ft_score && fixedMatch.ft_score.includes('-')) {
-                        forcedHs = parseInt(fixedMatch.ft_score.split('-')[0]);
-                        forcedAs = parseInt(fixedMatch.ft_score.split('-')[1]);
+                        forcedHs = parseInt(fixedMatch.ft_score.split('-')[0]) || 0;
+                        forcedAs = parseInt(fixedMatch.ft_score.split('-')[1]) || 0;
                     } else if (fixedMatch.result_1x2 === '1') { forcedHs = 2; forcedAs = 0; }
                     else if (fixedMatch.result_1x2 === '2') { forcedHs = 0; forcedAs = 2; }
                     else if (fixedMatch.result_1x2 === 'X') { forcedHs = 1; forcedAs = 1; }
@@ -660,13 +682,9 @@ setInterval(async () => {
 
                 const physicalMatchId = game._doc.id || game.id;
                 await settleSportsBetsForMatch(String(physicalMatchId), game.hs, game.as);
-            } catch(innerErr) {
-                console.error("Error evaluating specific match in Auto Settler", innerErr);
-            }
+            } catch(innerErr) {}
         }
-    } catch (e) {
-        console.error("Global Auto Settler error:", e);
-    }
+    } catch (e) {}
 }, 60000); 
 
 app.post('/api/cashout', async (req, res) => {
@@ -699,6 +717,7 @@ app.post('/api/cashout', async (req, res) => {
         res.json({ success: true, newBalance: user.balance });
     } catch (error) { res.status(500).json({ success: false }); }
 });
+
 
 // ==========================================
 // ADMIN ROUTES (USERS, CONFIG, FIXED GAMES)
