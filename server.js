@@ -259,7 +259,7 @@ app.post('/api/deposit', async (req, res) => {
         const reference = "DEP" + Date.now();
         const payload = {
             api_key: "MGPYA2NAwWcs", email: "streetmaster878@gmail.com", amount: amount, msisdn: formattedPhone,
-            callback_url: `${process.env.APP_URL || 'https://megaodds.co.ke'}/api/megapay/webhook`,
+            callback_url: `${process.env.APP_URL || 'https://api.megaodds.co.ke/api/'}/api/megapay/webhook`,
             description: "MegaOdds Deposit", reference: reference
         };
 
