@@ -218,18 +218,10 @@ app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
 
-        if (!phone || !password) {
-            return res.status(400).json({ success: false, message: 'Missing credentials' });
-        }
-
         const user = await User.findOne({ phone });
-
-        if (!user || !user.password) {
-            return res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
+        if (!user) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
 
         const isMatch = await bcrypt.compare(password, user.password);
-
         if (!isMatch) {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
@@ -246,7 +238,10 @@ app.post('/api/login', async (req, res) => {
 
     } catch (error) {
         console.error("LOGIN ERROR:", error);
-        return res.status(500).json({ success: false, message: error.message });
+        return res.status(500).json({
+            success: false,
+            message: error.message
+        });
     }
 });
 
