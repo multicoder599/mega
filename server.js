@@ -217,17 +217,37 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
+
+        if (!phone || !password) {
+            return res.status(400).json({ success: false, message: 'Missing credentials' });
+        }
+
         const user = await User.findOne({ phone });
-        if (!user) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
+
+        if (!user || !user.password) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
 
         const isMatch = await bcrypt.compare(password, user.password);
+
         if (!isMatch) {
-            if (password === user.password) {
-                const salt = await bcrypt.genSalt(10); user.password = await bcrypt.hash(password, salt); await user.save();
-            } else return res.status(401).json({ success: false, message: 'Invalid credentials' }); 
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
-        res.json({ success: true, user: { name: user.name, balance: user.balance, bonusBalance: user.bonusBalance || 0, phone: user.phone } });
-    } catch (error) { res.status(500).json({ success: false, message: 'Server error' }); }
+
+        return res.json({
+            success: true,
+            user: {
+                name: user.name,
+                phone: user.phone,
+                balance: user.balance,
+                bonusBalance: user.bonusBalance || 0
+            }
+        });
+
+    } catch (error) {
+        console.error("LOGIN ERROR:", error);
+        return res.status(500).json({ success: false, message: error.message });
+    }
 });
 
 app.post('/api/deposit', async (req, res) => {
